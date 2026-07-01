@@ -1,5 +1,9 @@
 # LodorOS
 
+<p align="center">
+  <img src="docs/screenshots/cleaned/lodor-library.jpg" width="66%" alt="LodorOS running on a handheld">
+</p>
+
 **Your self-hosted [RomM](https://romm.app) library, on your handheld.** LodorOS is a [MinUI](https://github.com/shauninman/MinUI) fork that turns a cheap retro handheld into a thin client for your own RomM game-library server: your whole collection shows up in the menu as lightweight stubs with box art, games download on demand, and saves sync both ways — automatically, around every play session. Wi-Fi-dark by default; **your library is never exposed to the open internet.**
 
 > **Beta.** LodorOS is a *client for your own RomM server* — not a plug-and-play "download games" OS. If you run (or want to run) RomM, this is for you.
@@ -22,6 +26,19 @@ TrimUI devices are served separately by the no-fork **Lodor-NextUI** tool.
 
 ## Requirements
 A self-hosted **RomM** server + a supported device. **BYOB** — LodorOS never ships BIOS/firmware; supply your own for systems that need them.
+
+## Screenshots
+
+<p align="center">
+  <img src="docs/screenshots/screens/platforms.jpg" width="32%" alt="Your whole RomM library in the menu">
+  <img src="docs/screenshots/screens/search.jpg" width="32%" alt="Search the catalog">
+  <img src="docs/screenshots/screens/results.jpg" width="32%" alt="Search results">
+</p>
+<p align="center">
+  <img src="docs/screenshots/screens/welcome.jpg" width="32%" alt="First-run welcome">
+  <img src="docs/screenshots/screens/network.jpg" width="32%" alt="Choose how to reach RomM">
+  <img src="docs/screenshots/screens/pairing.jpg" width="32%" alt="Pair with your server">
+</p>
 
 ---
 
