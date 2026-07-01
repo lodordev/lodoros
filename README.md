@@ -4,7 +4,7 @@
   <img src="docs/screenshots/cleaned/lodor-library.jpg" width="66%" alt="LodorOS running on a handheld">
 </p>
 
-**Your self-hosted [RomM](https://romm.app) library, on your handheld.** LodorOS is a [MinUI](https://github.com/shauninman/MinUI) fork that turns a cheap retro handheld into a thin client for your own RomM game-library server: your whole collection shows up in the menu as lightweight stubs with box art, games download on demand, and saves sync both ways — automatically, around every play session. Wi-Fi-dark by default; **your library is never exposed to the open internet.**
+**Your self-hosted [RomM](https://romm.app) library, on your handheld.** LodorOS is a [MinUI](https://github.com/shauninman/MinUI) fork that turns a cheap retro handheld into a thin client for your own RomM game-library server: your whole collection shows up in the menu as lightweight stubs with box art, games download on demand, and saves sync both ways — automatically, around every play session.
 
 > **Beta.** LodorOS is a *client for your own RomM server* — not a plug-and-play "download games" OS. If you run (or want to run) RomM, this is for you.
 
