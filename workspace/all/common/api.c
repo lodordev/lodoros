@@ -11,6 +11,7 @@
 #include <errno.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <string.h>
 
 #include <msettings.h>
 
@@ -50,10 +51,74 @@ void LOG_note(int level, const char* fmt, ...) {
 ///////////////////////////////
 
 uint32_t RGB_WHITE;
+uint32_t RGB_ACCENT; // lodor
 uint32_t RGB_BLACK;
 uint32_t RGB_LIGHT_GRAY;
 uint32_t RGB_GRAY;
 uint32_t RGB_DARK_GRAY;
+
+// ---- Lodor user color theming (NextUI-style) -------------------------------
+// Runtime theme colors (byte triplets), declared extern in defines.h and consumed
+// by the COLOR_* macros + the RGB_* mapping in GFX_init. Each defaults to the
+// compile-time TRIAD_* (warm-black / cream / red); THEME_load() overrides only the
+// keys present in theme.conf, so an absent file is a no-op (stock look preserved).
+unsigned char THEME_white[3]      = {TRIAD_WHITE};
+unsigned char THEME_accent[3]     = {TRIAD_ACCENT};
+unsigned char THEME_black[3]      = {TRIAD_BLACK};
+unsigned char THEME_light_gray[3] = {TRIAD_LIGHT_GRAY};
+unsigned char THEME_gray[3]       = {TRIAD_GRAY};
+unsigned char THEME_dark_gray[3]  = {TRIAD_DARK_GRAY};
+unsigned char THEME_dark_text[3]  = {TRIAD_DARK_TEXT};
+
+// theme.conf: one "key = #RRGGBB" per line (also accepts bare RRGGBB). Lines whose
+// first non-space char is '#' or ';' are comments; unknown keys are ignored; a key
+// with a bad value is skipped (keeps default). Keys map to the THEME_* arrays above.
+#define THEME_CONF_PATH RES_PATH "/theme.conf"
+
+static int THEME_nib(char c){
+	if (c>='0'&&c<='9') return c-'0';
+	if (c>='a'&&c<='f') return c-'a'+10;
+	if (c>='A'&&c<='F') return c-'A'+10;
+	return -1;
+}
+static int THEME_parse(const char* s, unsigned char out[3]){
+	while (*s==' '||*s=='\t') s++;
+	if (*s=='#') s++;
+	int n[6];
+	for (int i=0;i<6;i++){ n[i]=THEME_nib(s[i]); if (n[i]<0) return 0; }
+	out[0]=(unsigned char)((n[0]<<4)|n[1]);
+	out[1]=(unsigned char)((n[2]<<4)|n[3]);
+	out[2]=(unsigned char)((n[4]<<4)|n[5]);
+	return 1;
+}
+static void THEME_load(void){
+	FILE* f = fopen(THEME_CONF_PATH, "r");
+	if (!f) return; // no file => stock warm-black/cream/red, zero visual change
+	char line[256];
+	while (fgets(line, sizeof(line), f)) {
+		char* k = line;
+		while (*k==' '||*k=='\t') k++;
+		if (*k=='#'||*k==';'||*k=='\n'||*k=='\r'||*k=='\0') continue;
+		char* eq = strchr(k,'=');
+		if (!eq) continue;
+		char* ke = eq-1; *eq='\0';
+		while (ke>=k && (*ke==' '||*ke=='\t')) *ke--='\0';
+		unsigned char c[3];
+		if (!THEME_parse(eq+1,c)) continue;
+		if      (!strcmp(k,"bg"))         memcpy(THEME_black,c,3);
+		else if (!strcmp(k,"text"))       memcpy(THEME_white,c,3);
+		else if (!strcmp(k,"accent"))     memcpy(THEME_accent,c,3);
+		else if (!strcmp(k,"light_gray")) memcpy(THEME_light_gray,c,3);
+		else if (!strcmp(k,"gray"))       memcpy(THEME_gray,c,3);
+		else if (!strcmp(k,"dark_gray"))  memcpy(THEME_dark_gray,c,3);
+		else if (!strcmp(k,"dark_text"))  memcpy(THEME_dark_text,c,3);
+	}
+	fclose(f);
+	LOG_note(LOG_INFO, "theme.conf applied (bg=%02x%02x%02x text=%02x%02x%02x accent=%02x%02x%02x)\n",
+		THEME_black[0],THEME_black[1],THEME_black[2],
+		THEME_white[0],THEME_white[1],THEME_white[2],
+		THEME_accent[0],THEME_accent[1],THEME_accent[2]);
+}
 
 static struct GFX_Context {
 	SDL_Surface* screen;
@@ -99,11 +164,13 @@ SDL_Surface* GFX_init(int mode) {
 	gfx.vsync = VSYNC_STRICT;
 	gfx.mode = mode;
 	
-	RGB_WHITE		= SDL_MapRGB(gfx.screen->format, TRIAD_WHITE);
-	RGB_BLACK		= SDL_MapRGB(gfx.screen->format, TRIAD_BLACK);
-	RGB_LIGHT_GRAY	= SDL_MapRGB(gfx.screen->format, TRIAD_LIGHT_GRAY);
-	RGB_GRAY		= SDL_MapRGB(gfx.screen->format, TRIAD_GRAY);
-	RGB_DARK_GRAY	= SDL_MapRGB(gfx.screen->format, TRIAD_DARK_GRAY);
+	THEME_load(); // load user theme.conf (no-op if absent) before mapping colors
+	RGB_WHITE		= SDL_MapRGB(gfx.screen->format, THEME_white[0],THEME_white[1],THEME_white[2]);
+	RGB_ACCENT		= SDL_MapRGB(gfx.screen->format, THEME_accent[0],THEME_accent[1],THEME_accent[2]); // lodor
+	RGB_BLACK		= SDL_MapRGB(gfx.screen->format, THEME_black[0],THEME_black[1],THEME_black[2]);
+	RGB_LIGHT_GRAY	= SDL_MapRGB(gfx.screen->format, THEME_light_gray[0],THEME_light_gray[1],THEME_light_gray[2]);
+	RGB_GRAY		= SDL_MapRGB(gfx.screen->format, THEME_gray[0],THEME_gray[1],THEME_gray[2]);
+	RGB_DARK_GRAY	= SDL_MapRGB(gfx.screen->format, THEME_dark_gray[0],THEME_dark_gray[1],THEME_dark_gray[2]);
 	
 	asset_rgbs[ASSET_WHITE_PILL]	= RGB_WHITE;
 	asset_rgbs[ASSET_BLACK_PILL]	= RGB_BLACK;
@@ -150,7 +217,12 @@ SDL_Surface* GFX_init(int mode) {
 	sprintf(asset_path, RES_PATH "/assets@%ix.png", FIXED_SCALE);
 	if (!exists(asset_path)) LOG_info("missing assets, you're about to segfault dummy!\n");
 	gfx.assets = IMG_Load(asset_path);
-	
+
+	// lodor: the global ASSET_BUTTON red recolor was reverted — it bled red into the hardware
+	// STATUS/power pill (which shares the same button asset via the footer hint path), making the
+	// power pill look half-red. Button hints stay the shipped cream; the red brand accent lives on
+	// the pending-saves banner row (COLOR_ACCENT text) and the sync progress/indicator glyphs.
+
 	TTF_Init();
 	font.large 	= TTF_OpenFont(FONT_PATH, SCALE1(FONT_LARGE));
 	font.medium = TTF_OpenFont(FONT_PATH, SCALE1(FONT_MEDIUM));
@@ -748,16 +820,38 @@ int GFX_blitHardwareGroup(SDL_Surface* dst, int show_setting) {
 		// TODO: handle wifi
 		int show_wifi = PLAT_isOnline(); // NOOOOO! not every frame!
 
+		// lodor: native sync-activity indicator — the small accent word "sync" shown while a RomM
+		// WiFi/sync op is live (the bg op creates /tmp/romm-wifi.lock as a directory). One access()
+		// per render, drawn to the LEFT of the wifi/battery pill so the existing layout is untouched.
+		int show_sync = (access("/tmp/romm-wifi.lock", F_OK)==0);
+		SDL_Surface* sync_txt = NULL;
+		int sw = 0;                          // rendered "sync" text width
+		int sgap = SCALE1(PADDING/2);        // gap between text and the pill
+		if (show_sync) {
+			sync_txt = TTF_RenderUTF8_Blended(font.small, "sync", COLOR_ACCENT);
+			if (sync_txt) sw = sync_txt->w;
+		}
+		int sync_w = show_sync ? (sw + sgap) : 0;
+
 		int ww = SCALE1(PILL_SIZE-3);
 		ow = SCALE1(PILL_SIZE);
 		if (show_wifi) ow += ww;
+		ow += sync_w; // reserve space so left-aligned content doesn't overlap the glyph
 
 		ox = dst->w - SCALE1(PADDING) - ow;
 		oy = SCALE1(PADDING);
+		if (show_sync) {
+			if (sync_txt) {
+				int ty = oy + (SCALE1(PILL_SIZE) - sync_txt->h) / 2;
+				SDL_BlitSurface(sync_txt, NULL, dst, &(SDL_Rect){ ox, ty });
+				SDL_FreeSurface(sync_txt);
+			}
+			ox += sync_w;
+		}
 		GFX_blitPill(gfx.mode==MODE_MAIN ? ASSET_DARK_GRAY_PILL : ASSET_BLACK_PILL, dst, &(SDL_Rect){
 			ox,
 			oy,
-			ow,
+			ow - sync_w,
 			SCALE1(PILL_SIZE)
 		});
 		if (show_wifi) {
@@ -766,13 +860,13 @@ int GFX_blitHardwareGroup(SDL_Surface* dst, int show_setting) {
 			int y = oy;
 			x += (SCALE1(PILL_SIZE) - rect.w) / 2;
 			y += (SCALE1(PILL_SIZE) - rect.h) / 2;
-			
+
 			GFX_blitAsset(ASSET_WIFI, NULL, dst, &(SDL_Rect){x,y});
 			ox += ww;
 		}
 		GFX_blitBattery(dst, &(SDL_Rect){ox,oy});
 	}
-	
+
 	return ow;
 }
 void GFX_blitHardwareHints(SDL_Surface* dst, int show_setting) {
@@ -1640,6 +1734,26 @@ void PWR_powerOff(void) {
 	}
 }
 
+// --- LodorOS hybrid deep-sleep (PLAT_supportsDeepSleep-gated; Flip returns 0 -> never taken) ---
+__attribute__((weak)) int PLAT_supportsDeepSleep(void) { return 0; }
+__attribute__((weak)) int PLAT_deepSleep(void) {
+	int fd = open("/sys/power/state", O_WRONLY);
+	if (fd < 0) return -1;
+	int ret = write(fd, "mem", 3);
+	close(fd);
+	return ret < 0 ? -1 : 0;
+}
+// PWR_deepSleep: prefer a platform \$SYSTEM_PATH/bin/suspend helper, else PLAT_deepSleep.
+int PWR_deepSleep(void) {
+	char path[256];
+	char* sp = getenv("SYSTEM_PATH");
+	if (sp) {
+		snprintf(path, sizeof(path), "%s/bin/suspend", sp);
+		if (exists(path)) { int r = system(path); return (r==0)?0:-1; }
+	}
+	return PLAT_deepSleep();
+}
+
 static void PWR_enterSleep(void) {
 	SDL_PauseAudio(1);
 	if (GetHDMI()) {
@@ -1676,9 +1790,13 @@ static void PWR_waitForWake(void) {
 			break;
 		}
 		SDL_Delay(200);
-		if (pwr.can_poweroff && SDL_GetTicks()-sleep_ticks>=120000) { // increased to two minutes
-			if (pwr.is_charging) sleep_ticks += 60000; // check again in a minute
-			else PWR_powerOff();
+		if (SDL_GetTicks()-sleep_ticks>=120000) { // two minutes of faux-sleep
+			if (pwr.is_charging) { sleep_ticks += 60000; } // stay in faux-sleep while charging
+			else if (PLAT_supportsDeepSleep()) {
+				if (PWR_deepSleep()==0) return;            // suspended + resumed -> wake instantly
+				else if (pwr.can_poweroff) PWR_powerOff(); // deep sleep failed -> fall back to poweroff
+			}
+			else if (pwr.can_poweroff) { PWR_powerOff(); } // unchanged for non-deep-sleep platforms (Flip)
 		}
 	}
 	

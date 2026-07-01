@@ -1,0 +1,118 @@
+#!/bin/sh
+# romm-run <headless-args...> — bridge between the native MinUI menus and the headless sync binary.
+# Brings WiFi up, sets the clock (bounded), lets the route settle, then runs the binary with the env it
+# needs. config.json is read from the Lodor pak (cwd). Logs every step to Lodor.pak/romm-run.log.
+#   CFW=MinUI: the engine detects firmware from this env (cfw.GetCFW()); without it --download /
+#     --download-bios / path resolution die with: Unsupported CFW (empty).
+SDCARD="${SDCARD_PATH:-/mnt/SDCARD}"
+PLAT="${PLATFORM:-miyoomini}"
+PAKD="$SDCARD/Tools/$PLAT/Lodor.pak"
+LIB="$PAKD/lib/romm-sync-lib.sh"
+BIN="$PAKD/lodor-sync"
+LOG="$PAKD/romm-run.log"
+log(){ echo "$(date +'%F %T') $*" >> "$LOG" 2>/dev/null; }
+
+# Redact any Wi-Fi PSK before logging the invoke line. `--wifi-connect <ssid> <PSK>` passes the
+# plaintext Wi-Fi password as $3; NEVER write it to a log. Log the SSID, redact the secret.
+case "$1" in
+	--wifi-connect)
+		if [ -n "$3" ]; then log "=== invoke: --wifi-connect $2 <redacted> ==="
+		else log "=== invoke: --wifi-connect $2 ==="; fi
+		;;
+	*) log "=== invoke: $* ===" ;;
+esac
+# Surface the WiFi internals (service-on / wait_net / the auto USB re-enum) — default is /dev/null, which
+# blinds us to WHY a connect fails. Point it at a card log so "no usable link" is diagnosable.
+export WIFI_LOG="$PAKD/wifi.log"
+. "$LIB" 2>/dev/null || { log "FATAL: lib source failed: $LIB"; exit 1; }
+
+# --- Wi-Fi-only subcommands (onboarding step #38) — handled WITHOUT the engine binary. -------------
+# These are used by the native first-run Wi-Fi step. They do NOT touch the sync engine, so they run
+# before the binary check and never invent phase text — the lib owns the verified status line.
+case "$1" in
+	--wifi-scan)
+		# Security-aware scan for the launcher's native picker. One line per network, TAB-separated:
+		#   SECURED\t<SSID>   (flags column advertises WPA/WPA2/RSN/WEP/PSK -> needs a password)
+		#   OPEN\t<SSID>      (no security flags -> connect without a password)
+		# MECHANISM: the Miyoo's vendored `/customer/app/wpa_cli scan` + `scan_results` (NOT `iw`, which
+		# is absent on this device). The whole scan + parse + dedup-strongest + HONEST-fallback (unknown
+		# => SECURED, never blind open-connect) lives in ONE place — the lib's wifi_scan_flagged — so the
+		# scan mechanism is shared with the lib and not duplicated here.
+		wifi_scan_flagged > /tmp/romm-wifi-scan-flagged 2>/dev/null
+		cat /tmp/romm-wifi-scan-flagged 2>/dev/null
+		[ -s /tmp/romm-wifi-scan-flagged ]; exit $?
+		;;
+	--wifi-connect)
+		# --wifi-connect <SSID> [PSK]  — save creds, regenerate wpa config, then bring Wi-Fi up via the
+		# §1 HONEST verified path (wifi_acquire writes the verbose verified status to /tmp/romm-phase).
+		# Prints "RESULT online=1" on a verified-online link, "RESULT online=0" otherwise.
+		_ws="$2"; _wp="$3"
+		rm -f /tmp/dl-progress 2>/dev/null
+		if [ -z "$_ws" ]; then echo "RESULT online=0"; exit 1; fi
+		wifi_save_network "$_ws" "$_wp"
+		if wifi_acquire fg; then
+			log "wifi-connect OK ssid=$_ws"
+			echo "RESULT online=1"
+			wifi_release
+			exit 0
+		fi
+		# wifi_acquire already left an honest failure line in /tmp/romm-phase; do NOT overwrite it.
+		log "wifi-connect FAILED ssid=$_ws"
+		echo "RESULT online=0"
+		exit 1
+		;;
+esac
+
+[ -x "$BIN" ] || { log "FATAL: binary missing/not-exec: $BIN"; exit 3; }
+rm -f /tmp/dl-progress 2>/dev/null
+
+# Bring Wi-Fi up via the §1 HONEST verified path. wifi_acquire owns /tmp/romm-phase: it writes the
+# verbose verified status (Powering radio / Connecting to <SSID> / Associated / Got IP / Online) and,
+# on failure, a SPECIFIC honest reason. romm-run does NOT pre-write a fake "Connecting..." line.
+if ! wifi_acquire fg; then
+	log "wifi_acquire FAILED (no usable link) -> exit 2"
+	# Leave wifi_acquire's honest failure line standing (e.g. "Couldn't connect to <SSID>").
+	exit 2
+fi
+log "wifi_acquire OK (host=$ROMM_HOST)"
+
+# Clock — BOUNDED at 20s (the lib's ntpd-first set_clock blocks for minutes on a cold route). This is a
+# genuine post-online step, so the line is true when written (we are verified-online here).
+echo "Setting the clock..." > /tmp/romm-phase 2>/dev/null
+( set_clock >/dev/null 2>&1 ) & _cpid=$!
+_w=0; while kill -0 "$_cpid" 2>/dev/null && [ "$_w" -lt 20 ]; do sleep 1; _w=$((_w + 1)); done
+if kill -0 "$_cpid" 2>/dev/null; then
+	kill -9 "$_cpid" 2>/dev/null; killall -9 ntpd sntp 2>/dev/null
+	log "set_clock TIMEOUT after ${_w}s (killed) -> clock=$(date +'%F %T')"
+else
+	log "set_clock done in ${_w}s -> clock=$(date +'%F %T')"
+fi
+
+# WARM-WEDGE recovery + route-settle (engine-op path). This is the direct --download / --push-pending /
+# --mirror-* / --validate / --sync-feed path that runs $BIN itself (NOT via run_sync), so it needs its
+# OWN wedge gate. wifi_ensure_reachable does a real TCP reach to RomM: a working link returns in one
+# near-instant probe (it doubles as the route-settle), and ONLY a genuine wedge ("associated + has IP
+# but no traffic") pays the cost of a USB re-enum -> re-associate -> re-lease -> re-probe (up to 2x).
+# It owns /tmp/romm-phase while recovering (honest "Wi-Fi stalled - resetting radio..."). Non-fatal: a
+# real outage just logs and proceeds to the binary so its own honest network error / exit code 3
+# surfaces to the launcher's retry. (The --wifi-connect onboarding step returned long before here, so
+# it is never gated on RomM reachability - connecting to Wi-Fi only requires up+IP.)
+echo "Reaching your server..." > /tmp/romm-phase 2>/dev/null
+if wifi_ensure_reachable; then
+	log "reachability OK (RomM $ROMM_HOST:${ROMM_PORT:-443} reachable)"
+else
+	log "reachability: RomM unreachable after wedge-recovery - running binary anyway for honest rc"
+fi
+
+log "running: $BIN $* (cwd=$PAKD, CFW=MinUI)"
+cd "$PAKD" 2>/dev/null || log "WARN: cd $PAKD failed"
+out="$(CFW=MinUI MINUI_DEVICE="$PLAT" IS_MIYOO=1 SDCARD_PATH="$SDCARD" PLATFORM="$PLAT" "$BIN" "$@" 2>&1)"
+rc=$?
+printf '%s\n' "$out"
+printf '%s\n' "$out" >> "$LOG"
+# Launcher double-redirects --sync-feed (>feed inside the overlay's >romm-out wrapper) so the feed lands
+# in the wrong file; mirror it explicitly to the file the launcher reads.
+[ "$1" = "--sync-feed" ] && printf '%s\n' "$out" > /tmp/lodor-feed.txt 2>/dev/null
+log "binary exit rc=$rc"
+wifi_release
+exit $rc

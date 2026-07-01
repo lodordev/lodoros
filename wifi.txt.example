@@ -1,0 +1,4 @@
+# Miyoo Mini family Wi-Fi credentials. Copy to the ROOT of your SD card as wifi.txt
+# (your real wifi.txt is gitignored). Format: one network per line as  SSID:password
+# The colon is the delimiter, so SSIDs may contain spaces. Lines starting with # are ignored.
+MyHomeNetwork:mywifipassword

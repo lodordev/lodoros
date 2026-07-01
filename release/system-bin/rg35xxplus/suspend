@@ -1,0 +1,46 @@
+#!/bin/sh
+# LodorOS H700 (rg35xxplus / Allwinner H700) suspend-to-RAM helper.
+# Proven viable: spruceOS uses 'echo -n mem > /sys/power/state' on this exact SoC
+# (spruceUI/spruceOS AnbernicXXCommon.sh trigger_device_sleep). Pattern + retry/
+# false-negative handling ported from NextUI's tg5040 bin/suspend (same axp2202 PMIC).
+# Installs to: $SYSTEM_PATH/bin/suspend  (i.e. .system/rg35xxplus/bin/suspend)
+# Invoked by PWR_deepSleep() (api.c) which runs ${SYSTEM_PATH}/bin/suspend if present.
+set -u
+
+STATE=/sys/power/state
+wifi_was_up=
+
+before() {
+    # SDIO/USB wifi can wedge suspend-to-RAM on Allwinner; bring it down first.
+    # (spruce's main H700 path does NOT need this, but it is the safe default and
+    #  matches NextUI/TrimUI. Drop this block if on-device testing shows it is
+    #  unnecessary and slows resume.)
+    if [ "$(cat /sys/class/net/wlan0/operstate 2>/dev/null)" = "up" ]; then
+        wifi_was_up=1
+        killall -q wpa_supplicant 2>/dev/null
+        ifconfig wlan0 down 2>/dev/null
+    fi
+    sync
+}
+
+after() {
+    if [ -n "$wifi_was_up" ]; then
+        ifconfig wlan0 up 2>/dev/null
+        # romm-sync-lib wifi_acquire re-establishes the link on next sync.
+    fi
+}
+
+before
+ret=1
+for i in 1 2 3 4 5; do
+    t0=$(date +%s)
+    echo -n mem > $STATE
+    ret=$?
+    if [ $ret -eq 0 ]; then break; fi
+    # false-negative guard: if we were actually out for >5s, treat as success
+    t1=$(date +%s)
+    if [ $((t1-t0)) -gt 5 ]; then ret=0; break; fi
+    sleep 2
+done
+after &
+exit $ret

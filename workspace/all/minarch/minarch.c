@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <stdarg.h>
 #include <msettings.h>
+#include "cheevos.h"
 
 #include <unistd.h>
 #include <fcntl.h>
@@ -12,12 +13,15 @@
 #include <errno.h>
 #include <zlib.h>
 #include <pthread.h>
+#include <ctype.h> // lodor cheats (#6): isspace for the .cht parser
+#include <glob.h>  // lodor cheats (#6): wildcard .cht path matching
 
 #include "libretro.h"
 #include "defines.h"
 #include "api.h"
 #include "utils.h"
 #include "scaler.h"
+#include "ma_glhw.h"
 
 ///////////////////////////////////////
 
@@ -78,7 +82,8 @@ static struct Core {
 	const char states_dir[MAX_PATH]; // eg. /mnt/sdcard/.userdata/arm-480/GB-gambatte
 	const char saves_dir[MAX_PATH]; // eg. /mnt/sdcard/Saves/GB
 	const char bios_dir[MAX_PATH]; // eg. /mnt/sdcard/Bios/GB
-	
+	const char cheats_dir[MAX_PATH]; // lodor cheats (#6): eg. /mnt/sdcard/Cheats/GB
+
 	double fps;
 	double sample_rate;
 	double aspect_ratio;
@@ -93,6 +98,8 @@ static struct Core {
 	
 	void (*reset)(void);
 	void (*run)(void);
+	void (*cheat_reset)(void); // lodor cheats (#6): retro_cheat_reset
+	void (*cheat_set)(unsigned id, bool enabled, const char* code); // lodor cheats (#6): retro_cheat_set
 	size_t (*serialize_size)(void);
 	bool (*serialize)(void *data, size_t size);
 	bool (*unserialize)(const void *data, size_t size);
@@ -2009,6 +2016,18 @@ static bool environment_callback(unsigned cmd, void *data) { // copied from pico
 	}
 	// RETRO_ENVIRONMENT_SET_MEMORY_MAPS (36 | RETRO_ENVIRONMENT_EXPERIMENTAL)
 	// RETRO_ENVIRONMENT_GET_LANGUAGE 39
+	case RETRO_ENVIRONMENT_SET_HW_RENDER: { /* 14 */
+		// Additive GL hw-render path (ma_glhw). Returns false when GL is not
+		// compiled/usable so the core can fall back to software or fail cleanly
+		// instead of rendering into a context that does not exist.
+		struct retro_hw_render_callback *cb = (struct retro_hw_render_callback*)data;
+		if (GLHW_setHWRender(cb)) {
+			LOG_info("SET_HW_RENDER: honoring GL request (type=%u v%u.%u)\n", cb->context_type, cb->version_major, cb->version_minor);
+			break;
+		}
+		LOG_info("SET_HW_RENDER: GL path unavailable; refusing\n");
+		return false;
+	}
 	case RETRO_ENVIRONMENT_GET_CURRENT_SOFTWARE_FRAMEBUFFER: { /* (40 | RETRO_ENVIRONMENT_EXPERIMENTAL) */
 		// puts("RETRO_ENVIRONMENT_GET_CURRENT_SOFTWARE_FRAMEBUFFER");
 		break;
@@ -2842,10 +2861,16 @@ static void video_refresh_callback_main(const void *data, unsigned width, unsign
 	
 	GFX_blitRenderer(&renderer);
 	
-	if (!thread_video) GFX_flip(screen);
+	if (!thread_video) { CHEEVOS_render(screen); GFX_flip(screen); }
 	last_flip_time = SDL_GetTicks();
 }
 static void video_refresh_callback(const void *data, unsigned width, unsigned height, size_t pitch) {
+	if (data==RETRO_HW_FRAME_BUFFER_VALID) { // GL hw-rendered frame: read FBO back to RGB565, reuse software present path
+		unsigned hwpitch = 0;
+		const void* px = GLHW_active() ? GLHW_readbackRGB565(width, height, &hwpitch) : NULL;
+		if (px) video_refresh_callback_main(px, width, height, hwpitch);
+		return;
+	}
 	if (!data) return;
 	
 	if (thread_video) {
@@ -2882,6 +2907,203 @@ static size_t audio_sample_batch_callback(const int16_t *data, size_t frames) {
 };
 
 ///////////////////////////////////////
+// lodor cheats (#6): per-game RetroArch .cht support. Ported from NextUI
+// workspace/all/minarch/ma_cheats.c (which is itself based on picoarch/cheat.c).
+// Adapted for the LodorOS single-file minarch: no alt_name/map.txt alias chain
+// (LodorOS Game has no alt_name), wrapString/truncateString dropped (not in our
+// common — the Cheats menu wraps with GFX_wrapText at build time instead). The
+// libretro core applies cheats via retro_cheat_reset/retro_cheat_set; if the core
+// exports neither, cheats silently no-op (graceful). Cheat files live at
+// SDCARD/Cheats/<TAG>/<name>.cht — the standard RetroArch/MinUI-family location.
+
+#define CHEAT_MAX_PATHS 48
+
+struct Cheat {
+	const char *name;
+	const char *info;
+	int enabled;
+	const char *code;
+};
+struct Cheats {
+	int enabled;
+	size_t count;
+	struct Cheat *cheats;
+};
+static struct Cheats cheatcodes;
+
+static size_t Cheat_parseCount(FILE *file) {
+	size_t count = 0;
+	fscanf(file, " cheats = %lu\n", (unsigned long *)&count);
+	return count;
+}
+static const char *Cheat_findVal(const char *start) {
+	start--;
+	while(!isspace(*++start)) ;
+	while(isspace(*++start)) ;
+	if (*start != '=') return NULL;
+	while(isspace(*++start)) ;
+	return start;
+}
+static int Cheat_parseBool(const char *ptr, int *out) {
+	if (!strncasecmp(ptr, "true", 4)) *out = 1;
+	else if (!strncasecmp(ptr, "false", 5)) *out = 0;
+	else return -1;
+	return 0;
+}
+static int Cheat_parseString(const char *ptr, char *buf, size_t len) {
+	int index = 0;
+	size_t input_len = strlen(ptr);
+	buf[0] = '\0';
+	if (*ptr++ != '"') return -1;
+	while (*ptr != '\0' && *ptr != '"' && index < (int)len - 1) {
+		if (*ptr == '\\' && index < (int)input_len - 1) { ptr++; buf[index++] = *ptr++; }
+		else if (*ptr == '&' && !strncmp(ptr, "&quot;", 6)) { buf[index++] = '"'; ptr += 6; }
+		else buf[index++] = *ptr++;
+	}
+	if (*ptr != '"') { buf[0] = '\0'; return -1; }
+	buf[index] = '\0';
+	return 0;
+}
+static int Cheat_parseCheats(struct Cheats *cheats, FILE *file) {
+	int ret = -1;
+	char line[512];
+	char buf[512];
+	const char *ptr;
+	do {
+		if (!fgets(line, sizeof(line), file)) { ret = 0; break; }
+		if (line[strlen(line) - 1] != '\n' && !feof(file)) { LOG_warn("Cheat line too long\n"); continue; }
+		if ((ptr = strstr(line, "cheat"))) {
+			int index = -1;
+			struct Cheat *cheat;
+			size_t len;
+			sscanf(ptr, "cheat%d", &index);
+			if (index < 0 || index >= (int)cheats->count) continue;
+			cheat = &cheats->cheats[index];
+			if (strstr(ptr, "_desc")) {
+				ptr = Cheat_findVal(ptr);
+				if (!ptr || Cheat_parseString(ptr, buf, sizeof(buf))) { LOG_warn("Couldn't parse cheat %d description\n", index); continue; }
+				len = strlen(buf);
+				if (len == 0) continue;
+				cheat->name = calloc(len+1, sizeof(char));
+				if (!cheat->name) goto finish;
+				strcpy((char *)cheat->name, buf);
+				// keep a full untruncated copy for the detail popup (menu truncates the row)
+				cheat->info = calloc(len+1, sizeof(char));
+				if (cheat->info) strcpy((char *)cheat->info, buf);
+			} else if (strstr(ptr, "_code")) {
+				ptr = Cheat_findVal(ptr);
+				if (!ptr || Cheat_parseString(ptr, buf, sizeof(buf))) { LOG_warn("Couldn't parse cheat %d code\n", index); continue; }
+				len = strlen(buf);
+				if (len == 0) continue;
+				cheat->code = calloc(len+1, sizeof(char));
+				if (!cheat->code) goto finish;
+				strcpy((char *)cheat->code, buf);
+			} else if (strstr(ptr, "_enable")) {
+				ptr = Cheat_findVal(ptr);
+				if (!ptr || Cheat_parseBool(ptr, &cheat->enabled)) { LOG_warn("Couldn't parse cheat %d enabled\n", index); continue; }
+			}
+		}
+	} while(1);
+finish:
+	return ret;
+}
+// Build the candidate .cht paths, most-likely first. LodorOS game.name is the ROM
+// basename WITH extension (eg "Super Mario World.zip"); core.extensions is "smc|sfc|..".
+static void Cheat_getPaths(char paths[CHEAT_MAX_PATHS][MAX_PATH], int* count) {
+	const int reserve = 2;
+	// 1) literal basename incl. extension: Cheats/<TAG>/Super Mario World.zip.cht
+	snprintf(paths[(*count)++], MAX_PATH, "%s/%s.cht", core.cheats_dir, game.name);
+	// 2) <stem>.<ext>.cht for each extension the core advertises
+	{
+		int i = 0; char* ext; char exts[128];
+		if (core.extensions[0] && strlen(core.extensions) < sizeof(exts)) {
+			strcpy(exts, core.extensions);
+			while ((ext = strtok(i ? NULL : exts, "|"))) {
+				if (*count >= CHEAT_MAX_PATHS - reserve) break;
+				char stem[MAX_PATH];
+				strncpy(stem, game.name, sizeof(stem)-1); stem[sizeof(stem)-1]='\0';
+				char* dot = strrchr(stem, '.');
+				if (dot && strlen(dot) > 2 && strlen(dot) <= 5) {
+					*dot = '\0';
+					if (strlen(core.cheats_dir)+strlen(stem)+strlen(ext)+10 < MAX_PATH)
+						snprintf(paths[(*count)++], MAX_PATH, "%s/%s.%s.cht", core.cheats_dir, stem, ext);
+				}
+				i++;
+			}
+		}
+	}
+	// 3) sanitized display name (strips region/cruft): Cheats/<TAG>/Super Mario World.cht
+	if (*count < CHEAT_MAX_PATHS - 1) {
+		char disp[MAX_PATH]; getDisplayName(game.name, disp);
+		snprintf(paths[(*count)++], MAX_PATH, "%s/%s.cht", core.cheats_dir, disp);
+		// 4) wildcard fallback
+		if (*count < CHEAT_MAX_PATHS)
+			snprintf(paths[(*count)++], MAX_PATH, "%s/%s*.cht", core.cheats_dir, disp);
+	}
+}
+static void Cheats_free(void) {
+	for (size_t i = 0; i < cheatcodes.count; i++) {
+		struct Cheat *cheat = &cheatcodes.cheats[i];
+		if (cheat) { free((char *)cheat->name); free((char *)cheat->info); free((char *)cheat->code); }
+	}
+	free(cheatcodes.cheats);
+	cheatcodes.cheats = NULL;
+	cheatcodes.count = 0;
+}
+static bool Cheats_load(void) {
+	int success = 0;
+	FILE *file = NULL;
+	char paths[CHEAT_MAX_PATHS][MAX_PATH];
+	int path_count = 0;
+	Cheat_getPaths(paths, &path_count);
+	char filename[MAX_PATH] = {0};
+	for (int i=0; i<path_count; i++) {
+		if (strchr(paths[i],'*')) {
+			glob_t gr; memset(&gr, 0, sizeof(glob_t));
+			if (glob(paths[i], 0, NULL, &gr) == 0 && gr.gl_pathc > 0) {
+				for (size_t gi = 0; gi < gr.gl_pathc; ++gi) {
+					if (!suffixMatch(".cht", gr.gl_pathv[gi])) continue;
+					strncpy(filename, gr.gl_pathv[gi], MAX_PATH-1); filename[MAX_PATH-1]='\0';
+					if (exists(filename)) break;
+					filename[0] = '\0';
+				}
+			}
+			globfree(&gr);
+			if (filename[0] == '\0') continue;
+		} else {
+			strncpy(filename, paths[i], MAX_PATH-1); filename[MAX_PATH-1]='\0';
+			if (!exists(filename)) { filename[0] = '\0'; continue; }
+		}
+		break;
+	}
+	if (filename[0] == '\0') { LOG_info("No cheat file found\n"); goto finish; }
+	LOG_info("Loading cheats from %s\n", filename);
+	file = fopen(filename, "r");
+	if (!file) { LOG_error("Couldn't open cheat file: %s\n", filename); goto finish; }
+	cheatcodes.count = Cheat_parseCount(file);
+	if (cheatcodes.count <= 0) { LOG_error("Couldn't read cheat count\n"); goto finish; }
+	cheatcodes.cheats = calloc(cheatcodes.count, sizeof(struct Cheat));
+	if (!cheatcodes.cheats) { LOG_error("Couldn't allocate cheats\n"); goto finish; }
+	if (Cheat_parseCheats(&cheatcodes, file)) { LOG_error("Error reading cheats\n"); goto finish; }
+	LOG_info("Found %lu cheats for the current game.\n", (unsigned long)cheatcodes.count);
+	success = 1;
+finish:
+	if (!success) Cheats_free();
+	if (file) fclose(file);
+	return success;
+}
+// Push the enabled set into the live core (retro_cheat_reset then retro_cheat_set
+// for each enabled cheat). No-op if the core exports neither symbol.
+static void Core_applyCheats(struct Cheats *cheats) {
+	if (!cheats) return;
+	if (!core.cheat_reset || !core.cheat_set) return;
+	core.cheat_reset();
+	for (size_t i = 0; i < cheats->count; i++)
+		if (cheats->cheats[i].enabled)
+			core.cheat_set(i, cheats->cheats[i].enabled, cheats->cheats[i].code);
+}
+
+///////////////////////////////////////
 
 void Core_getName(char* in_name, char* out_name) {
 	strcpy(out_name, basename(in_name));
@@ -2910,7 +3132,9 @@ void Core_open(const char* core_path, const char* tag_name) {
 	core.get_region = dlsym(core.handle, "retro_get_region");
 	core.get_memory_data = dlsym(core.handle, "retro_get_memory_data");
 	core.get_memory_size = dlsym(core.handle, "retro_get_memory_size");
-	
+	core.cheat_reset = dlsym(core.handle, "retro_cheat_reset"); // lodor cheats (#6)
+	core.cheat_set = dlsym(core.handle, "retro_cheat_set");     // lodor cheats (#6)
+
 	void (*set_environment_callback)(retro_environment_t);
 	void (*set_video_refresh_callback)(retro_video_refresh_t);
 	void (*set_audio_sample_callback)(retro_audio_sample_t);
@@ -2939,8 +3163,18 @@ void Core_open(const char* core_path, const char* tag_name) {
 	
 	sprintf((char*)core.config_dir, USERDATA_PATH "/%s-%s", core.tag, core.name);
 	sprintf((char*)core.states_dir, SHARED_USERDATA_PATH "/%s-%s", core.tag, core.name);
-	sprintf((char*)core.saves_dir, SDCARD_PATH "/Saves/%s", core.tag);
+	// MULTI-USER (approach #1): honor $SAVES_PATH (the per-platform boot script exports
+	// SAVES_PATH="$SDCARD_PATH/Saves/$LODOR_PROFILE", profile-namespaced) so the emulator
+	// writes the save into the SAME profile dir the engine syncs. Fall back to the compile-
+	// time macro when unset (single-user / tool launched outside the boot env) — keeping the
+	// historical path byte-identical. BIOS stays shared (macro), so only saves are per-user.
+	{
+		const char* sp = getenv("SAVES_PATH");
+		if (sp && *sp) sprintf((char*)core.saves_dir, "%s/%s", sp, core.tag);
+		else           sprintf((char*)core.saves_dir, SDCARD_PATH "/Saves/%s", core.tag);
+	}
 	sprintf((char*)core.bios_dir, SDCARD_PATH "/Bios/%s", core.tag);
+	sprintf((char*)core.cheats_dir, SDCARD_PATH "/Cheats/%s", core.tag); // lodor cheats (#6)
 	
 	char cmd[512];
 	sprintf(cmd, "mkdir -p \"%s\"; mkdir -p \"%s\"", core.config_dir, core.states_dir);
@@ -2967,9 +3201,17 @@ void Core_load(void) {
 	LOG_info("game path: %s (%i)\n", game_info.path, game.size);
 	
 	core.load_game(&game_info);
-	
+
+	// lodor cheats (#6): load this game's .cht (if any) and push the enabled set into the core.
+	if (Cheats_load()) Core_applyCheats(&cheatcodes);
+
 	SRAM_read();
 	RTC_read();
+	
+	// RetroAchievements (softcore): bring up rc_client (logs in from stored token)
+	// and identify this game now that core memory is valid (task #46).
+	CHEEVOS_init();
+	CHEEVOS_load_game((char*)core.tag, game_info.path, core.get_memory_data, core.get_memory_size);
 	
 	// NOTE: must be called after core.load_game!
 	struct retro_system_av_info av_info = {};
@@ -2983,6 +3225,15 @@ void Core_load(void) {
 	core.aspect_ratio = a;
 	
 	LOG_info("aspect_ratio: %f (%ix%i) fps: %f\n", a, av_info.geometry.base_width,av_info.geometry.base_height, core.fps);
+
+	// If a core requested SET_HW_RENDER, bring up the GL context + FBO now (after
+	// load_game + av_info, per the libretro hw-render contract) and context_reset it.
+	if (GLHW_requested()) {
+		if (GLHW_start(av_info.geometry.max_width, av_info.geometry.max_height))
+			LOG_info("GL hw render online (max %ux%u)\n", av_info.geometry.max_width, av_info.geometry.max_height);
+		else
+			LOG_error("GL hw render init FAILED -- core may not display\n");
+	}
 }
 void Core_reset(void) {
 	core.reset();
@@ -2991,9 +3242,12 @@ void Core_unload(void) {
 	SND_quit();
 }
 void Core_quit(void) {
+	GLHW_stop(); // tear down GL context/FBO (no-op if never started)
 	if (core.initialized) {
 		SRAM_write();
 		RTC_write();
+		CHEEVOS_unload();
+		Cheats_free(); // lodor cheats (#6)
 		core.unload_game();
 		core.deinit();
 		core.initialized = 0;
@@ -3005,13 +3259,14 @@ void Core_close(void) {
 
 ///////////////////////////////////////
 
-#define MENU_ITEM_COUNT 5
+#define MENU_ITEM_COUNT 6
 #define MENU_SLOT_COUNT 8
 
 enum {
 	ITEM_CONT,
 	ITEM_SAVE,
 	ITEM_LOAD,
+	ITEM_FLASHBACK,
 	ITEM_OPTS,
 	ITEM_QUIT,
 };
@@ -3053,6 +3308,7 @@ static struct {
 		[ITEM_CONT] = "Continue",
 		[ITEM_SAVE] = "Save",
 		[ITEM_LOAD] = "Load",
+		[ITEM_FLASHBACK] = "Flashback",
 		[ITEM_OPTS] = "Options",
 		[ITEM_QUIT] = "Quit",
 	}
@@ -3563,15 +3819,64 @@ static int OptionQuicksave_onConfirm(MenuList* list, int i) {
 	PWR_powerOff();
 }
 
+// lodor cheats (#6): the in-game Options > Cheats submenu. Mirrors NextUI's
+// OptionCheats_menu (ma_frontend_opts.c): each loaded cheat is an On/Off toggle that
+// re-applies to the live core on change; A on a row shows the full description. The
+// item list is built lazily from cheatcodes the first time the submenu opens.
+static int OptionCheats_optionChanged(MenuList* list, int i) {
+	MenuItem* item = &list->items[i];
+	if (i < 0 || i >= (int)cheatcodes.count) return MENU_CALLBACK_NOP;
+	struct Cheat *cheat = &cheatcodes.cheats[i];
+	cheat->enabled = item->value;
+	Core_applyCheats(&cheatcodes);
+	return MENU_CALLBACK_NOP;
+}
+static int OptionCheats_optionDetail(MenuList* list, int i) {
+	if (i < 0 || i >= (int)cheatcodes.count) return MENU_CALLBACK_NOP;
+	struct Cheat *cheat = &cheatcodes.cheats[i];
+	if (cheat->info) return Menu_message((char*)cheat->info, (char*[]){ "B","BACK", NULL });
+	return MENU_CALLBACK_NOP;
+}
+static MenuList OptionCheats_menu = {
+	.type = MENU_FIXED,
+	.on_confirm = OptionCheats_optionDetail,
+	.on_change = OptionCheats_optionChanged,
+	.items = NULL,
+};
+static int OptionCheats_openMenu(MenuList* list, int i) {
+	if (cheatcodes.count == 0) return Menu_message("No cheats found for this game.", (char*[]){ "B","BACK", NULL });
+	if (OptionCheats_menu.items == NULL) {
+		OptionCheats_menu.items = calloc(cheatcodes.count + 1, sizeof(MenuItem));
+		if (!OptionCheats_menu.items) return MENU_CALLBACK_NOP;
+		for (size_t j = 0; j < cheatcodes.count; j++) {
+			struct Cheat *cheat = &cheatcodes.cheats[j];
+			MenuItem *item = &OptionCheats_menu.items[j];
+			const char* nm = cheat->name ? cheat->name : "(unnamed)";
+			item->name = strdup(nm);
+			if (cheat->info) {
+				item->desc = strdup(cheat->info);
+				if (item->desc) GFX_wrapText(font.tiny, item->desc, SCALE1(240), 2);
+			}
+			item->value = cheat->enabled;
+			item->values = onoff_labels;
+		}
+	} else {
+		for (size_t j = 0; j < cheatcodes.count; j++)
+			OptionCheats_menu.items[j].value = cheatcodes.cheats[j].enabled;
+	}
+	if (OptionCheats_menu.items[0].name) Menu_options(&OptionCheats_menu);
+	return MENU_CALLBACK_NOP;
+}
+
 static MenuList options_menu = {
 	.type = MENU_LIST,
 	.items = (MenuItem[]) {
 		{"Frontend", "MinUI (" BUILD_DATE " " BUILD_HASH ")",.on_confirm=OptionFrontend_openMenu},
 		{"Emulator",.on_confirm=OptionEmulator_openMenu},
 		{"Controls",.on_confirm=OptionControls_openMenu},
-		{"Shortcuts",.on_confirm=OptionShortcuts_openMenu}, 
+		{"Shortcuts",.on_confirm=OptionShortcuts_openMenu},
 		{"Save Changes",.on_confirm=OptionSaveChanges_openMenu},
-		{NULL},
+		{"Cheats",.on_confirm=OptionCheats_openMenu}, // lodor cheats (#6) — index 5, after Save Changes (index 4)
 		{NULL},
 		{NULL},
 	}
@@ -4221,6 +4526,94 @@ static char* getAlias(char* path, char* alias) {
 	}
 }
 
+
+// ---- lodor: in-game Flashback (minarch) -------------------------------------
+// Lists this game's save-history timeline from the server, lets the player pick a point, restores it,
+// reloads it into the LIVE core, and soft-resets so the game reboots into the flashed-back save. The
+// current save is preserved first by the engine's lose-proof --restore-save (it pushes/stages the
+// current save before overwriting). Returns 1 if a flashback was APPLIED (caller closes the menu),
+// 0 on cancel/failure. Reuses the same GFX/PAD list-render idiom as the native launcher.
+#define LODOR_FB_MAX 32
+static void fb_shq(const char* in, char* out, size_t n) { // single-quote-escape for the shell
+	size_t o=0; if(o<n-1)out[o++]='\'';
+	for(const char* p=in;*p&&o<n-5;p++){ if(*p=='\''){out[o++]='\'';out[o++]='\\';out[o++]='\'';out[o++]='\'';} else out[o++]=*p; }
+	if(o<n-1)out[o++]='\''; out[o]='\0';
+}
+static void fb_msg(const char* m) {
+	GFX_clear(screen); GFX_blitMessage(font.large,(char*)m,screen,&(SDL_Rect){0,0,screen->w,screen->h});
+	GFX_blitButtonGroup((char*[]){ "B","BACK", NULL },0,screen,1); GFX_flip(screen);
+	while(1){ GFX_startFrame(); PAD_poll(); if(PAD_justPressed(BTN_B)||PAD_justPressed(BTN_A)) break; SDL_Delay(16); }
+}
+static int Flashback_run(const char* rom_name) {
+	char rrun[MAX_PATH], pathq[MAX_PATH*2], cmd[MAX_PATH*4];
+	snprintf(rrun,sizeof(rrun),"%s/Tools/%s/Lodor.pak/bin/romm-run",SDCARD_PATH,PLATFORM);
+	fb_shq(game.path,pathq,sizeof(pathq));
+
+	GFX_clear(screen); GFX_blitMessage(font.large,"Loading save points...",screen,&(SDL_Rect){0,0,screen->w,screen->h}); GFX_flip(screen);
+	snprintf(cmd,sizeof(cmd),"'%s' --list-saves %s > /tmp/lodor-fb.txt 2>/dev/null",rrun,pathq);
+	system(cmd);
+
+	int ids[LODOR_FB_MAX]; static char labels[LODOR_FB_MAX][96]; int n=0;
+	FILE* f=fopen("/tmp/lodor-fb.txt","r");
+	if(f){ char line[512];
+		while(n<LODOR_FB_MAX && fgets(line,sizeof(line),f)){
+			char* nl=strpbrk(line,"\r\n"); if(nl)*nl='\0'; if(!line[0]) continue;
+			char* id=line; char* date=strchr(line,'\t'); if(!date) continue; *date++='\0';
+			char* dev=strchr(date,'\t'); if(dev)*dev++='\0'; else dev=(char*)"";
+			if(dev[0]){ char* t=strchr(dev,'\t'); if(t)*t='\0'; }
+			ids[n]=atoi(id);
+			snprintf(labels[n],sizeof(labels[n]),"%s  %s",date,dev[0]?dev:"-"); n++;
+		}
+		fclose(f);
+	}
+	if(n==0){ fb_msg("No save points yet.\nPlay and sync first."); return 0; }
+
+	int sel=0, dirty=1, confirm=0;
+	while(1){
+		GFX_startFrame(); PAD_poll();
+		if(confirm){
+			if(PAD_justPressed(BTN_B)){ confirm=0; dirty=1; }
+			else if(PAD_justPressed(BTN_A)){
+				GFX_clear(screen); GFX_blitMessage(font.large,"Flashing back...",screen,&(SDL_Rect){0,0,screen->w,screen->h}); GFX_flip(screen);
+				snprintf(cmd,sizeof(cmd),"'%s' --restore-save %s %d 2>/dev/null",rrun,pathq,ids[sel]);
+				int restored=0; FILE* p=popen(cmd,"r");
+				if(p){ char b[256]; while(fgets(b,sizeof(b),p)){ char* r=strstr(b,"restored="); if(r) restored=atoi(r+9); } pclose(p); }
+				if(restored){ SRAM_read(); core.reset(); return 1; }
+				fb_msg("Couldn't reach RomM.\nWi-Fi may be down - try again."); confirm=0; dirty=1;
+			}
+		} else {
+			if(PAD_justPressed(BTN_UP)){ sel=(sel-1+n)%n; dirty=1; }
+			else if(PAD_justPressed(BTN_DOWN)){ sel=(sel+1)%n; dirty=1; }
+			else if(PAD_justPressed(BTN_B)){ return 0; }
+			else if(PAD_justPressed(BTN_A)){ confirm=1; dirty=1; }
+		}
+		if(dirty){
+			GFX_clear(screen); int ow=GFX_blitHardwareGroup(screen,0);
+			if(confirm){
+				char msg[320]; snprintf(msg,sizeof(msg),"Flash back to:\n%s\n\nThe game restarts there.\nYour current save is kept.",labels[sel]);
+				GFX_blitMessage(font.large,msg,screen,&(SDL_Rect){0,0,screen->w,screen->h});
+				GFX_blitButtonGroup((char*[]){ "B","CANCEL", "A","FLASHBACK", NULL },1,screen,1);
+			} else {
+				char title[160]; snprintf(title,sizeof(title),"Flashback \xe2\x80\x94 %s",rom_name);
+				char tbuf[176]; GFX_truncateText(font.large,title,tbuf,screen->w-SCALE1(PADDING*2)-ow,SCALE1(BUTTON_PADDING*2));
+				SDL_Surface* tt=TTF_RenderUTF8_Blended(font.large,tbuf,COLOR_WHITE);
+				if(tt){ SDL_BlitSurface(tt,NULL,screen,&(SDL_Rect){SCALE1(PADDING+BUTTON_PADDING),SCALE1(PADDING+4)}); SDL_FreeSurface(tt); }
+				for(int i=0;i<n && i<MAIN_ROW_COUNT-1;i++){
+					int row=i+1; SDL_Color color=COLOR_WHITE;
+					char nb[160]; int tw=GFX_truncateText(font.large,labels[i],nb,screen->w-SCALE1(PADDING*2),SCALE1(BUTTON_PADDING*2));
+					int mw=MIN(screen->w-SCALE1(PADDING*2),tw);
+					if(i==sel){ GFX_blitPill(ASSET_WHITE_PILL,screen,&(SDL_Rect){SCALE1(PADDING),SCALE1(PADDING+(row*PILL_SIZE)),mw,SCALE1(PILL_SIZE)}); color=COLOR_BLACK; }
+					SDL_Surface* txt=TTF_RenderUTF8_Blended(font.large,nb,color);
+					if(txt){ SDL_BlitSurface(txt,&(SDL_Rect){0,0,mw-SCALE1(BUTTON_PADDING*2),txt->h},screen,&(SDL_Rect){SCALE1(PADDING+BUTTON_PADDING),SCALE1(PADDING+(row*PILL_SIZE)+4)}); SDL_FreeSurface(txt); }
+				}
+				GFX_blitButtonGroup((char*[]){ "B","BACK", "A","FLASHBACK", NULL },1,screen,1);
+			}
+			GFX_flip(screen); dirty=0;
+		}
+		SDL_Delay(16);
+	}
+}
+
 static void Menu_loop(void) {
 	menu.bitmap = SDL_CreateRGBSurfaceFrom(renderer.src, renderer.true_w, renderer.true_h, FIXED_DEPTH, renderer.src_p, RGBA_MASK_565);
 	// LOG_info("Menu_loop:menu.bitmap %ix%i\n", menu.bitmap->w,menu.bitmap->h);
@@ -4355,6 +4748,11 @@ static void Menu_loop(void) {
 					Menu_loadState();
 					status = STATUS_LOAD;
 					show_menu = 0;
+				}
+				break;
+				case ITEM_FLASHBACK: {
+					if (Flashback_run(rom_name)) { status = STATUS_RESET; show_menu = 0; }
+					else dirty = 1;
 				}
 				break;
 				case ITEM_OPTS: {
@@ -4660,6 +5058,7 @@ static void* coreThread(void *arg) {
 			core.run();
 			limitFF();
 			trackFPS();
+			CHEEVOS_do_frame();
 		}
 	}
 	pthread_exit(NULL);
@@ -4754,6 +5153,7 @@ int main(int argc , char* argv[]) {
 			core.run();
 			limitFF();
 			trackFPS();
+			CHEEVOS_do_frame();
 		}
 
 		if (thread_video && !quit) {
@@ -4762,6 +5162,7 @@ int main(int argc , char* argv[]) {
 			
 			if (backbuffer) {
 				video_refresh_callback_main(backbuffer->pixels,backbuffer->w,backbuffer->h,backbuffer->pitch);
+				CHEEVOS_render(screen);
 				GFX_flip(screen);
 			}
 			core_rq = (pthread_cond_t)PTHREAD_COND_INITIALIZER;

@@ -1,0 +1,9 @@
+{
+  "name": "N64",
+  "type": "EMU",
+  "description": "LodorOS thin shim - runs Nintendo 64 on the device's stock Anbernic RetroArch (ships no emulator). Approach credit: ryanmsartor.",
+  "platforms": [
+    "rg35xxplus"
+  ],
+  "launch": "launch.sh"
+}

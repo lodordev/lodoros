@@ -938,6 +938,10 @@ void PLAT_powerOff(void) {
 	exit(0);
 }
 
+// LodorOS: H700 supports suspend-to-RAM. PWR_deepSleep() (api.c) runs
+// \$SYSTEM_PATH/bin/suspend (echo mem > /sys/power/state) instead of powering off.
+int PLAT_supportsDeepSleep(void) { return 1; }
+
 ///////////////////////////////
 
 void PLAT_setCPUSpeed(int speed) {

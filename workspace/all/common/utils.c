@@ -30,7 +30,9 @@ int containsString(char* haystack, char* needle) {
 	return strcasestr(haystack, needle) != NULL;
 }
 int hide(char* file_name) {
-	return file_name[0]=='.' || suffixMatch(".disabled", file_name) || exactMatch("map.txt", file_name);
+	return file_name[0]=='.' || suffixMatch(".disabled", file_name) || exactMatch("map.txt", file_name)
+		|| exactMatch("Lodor.pak", file_name) || exactMatch("HoardUI Options.pak", file_name)
+		|| exactMatch("Sync.pak", file_name) || exactMatch("Sync Pending.pak", file_name); // HoardUI: hide engine/Y-target/Sync paks from Tools
 }
 
 void getDisplayName(const char* in_name, char* out_name) {

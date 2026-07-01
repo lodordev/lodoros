@@ -1,0 +1,284 @@
+#!/bin/sh
+set -x
+BIN_DIR="$(dirname "$0")"
+PAK_DIR="$(dirname "$BIN_DIR")"
+PAK_NAME="$(basename "$PAK_DIR")"
+PAK_NAME="${PAK_NAME%.*}"
+
+architecture=arm
+if uname -m | grep -q '64'; then
+    architecture=arm64
+fi
+
+export PATH="$PAK_DIR/bin/$architecture:$PAK_DIR/bin/$PLATFORM:$PAK_DIR/bin:$PATH"
+export LD_LIBRARY_PATH="$PAK_DIR/lib/$PLATFORM:$PAK_DIR/lib:$LD_LIBRARY_PATH"
+
+# --- my355 (RK3566) Wi-Fi radio bring-up -------------------------------------
+# The Miyoo Flip V2 / RK3566 carries an RTL8821CS SDIO Wi-Fi chip whose kernel
+# module is NOT guaranteed to be loaded when this pak runs (confirmed on-hardware:
+# `ifconfig wlan0 up -> SIOCGIFFLAGS: No such device`, wpa_supplicant
+# "Could not read interface wlan0 flags: No such device" -> the wlan0 netdev does
+# not exist because the driver was never insmod'd). The driver .ko already lives on
+# the device's stock internal rootfs (we do NOT ship it -- it's a vendored Realtek
+# blob; leaving it on-device avoids redistribution). So: load cfg80211 (8821cs dep)
+# + the wifi module from whatever path the stock firmware provides, then WAIT for
+# wlan0 to enumerate before any ifconfig/wpa_supplicant. Mirrors the proven RK3566
+# bring-up (muOS device-network.sh `rk*` branch + JELOS RTL8821CS) and the
+# miyoomini 8188fu insmod pattern. my355-ONLY (called only from the my355 branch).
+_my355_wlan0_present() { [ -d /sys/class/net/wlan0 ]; }
+_my355_load_wifi_module() {
+    # Already up from a prior call or stock auto-load? nothing to do.
+    _my355_wlan0_present && { echo "my355: wlan0 already present"; return 0; }
+
+    # cfg80211 is the mac80211/nl80211 core the 8821cs SDIO driver depends on.
+    modprobe cfg80211 2>/dev/null || true
+
+    # Preferred: modprobe by name (resolves deps from the device's modules.dep).
+    # 8821cs is the consensus RK3566 handheld Wi-Fi driver (RTL8821CS, SDIO).
+    for _mod in 8821cs rtl8821cs; do
+        grep -qw "^${_mod}" /proc/modules 2>/dev/null && break
+        modprobe "$_mod" 2>/dev/null && break
+    done
+
+    # Fallback: if modprobe could not find it (no modules.dep entry), discover the
+    # .ko on the stock rootfs and insmod it directly. Search the known RK3566 Realtek
+    # paths first, then a broad /lib/modules sweep. Covers 8821cs primarily; tolerant
+    # of an alternate Realtek SDIO part on a variant unit.
+    if ! _my355_wlan0_present; then
+        _ko=""
+        for _cand in             /lib/modules/*/kernel/drivers/net/wireless/rtl8821cs/8821cs.ko             /lib/modules/*/kernel/drivers/net/wireless/*8821c*/*.ko             /lib/modules/*/*8821c*.ko             /lib/modules/*/kernel/drivers/net/wireless/*8723*/*.ko ; do
+            [ -f "$_cand" ] && { _ko="$_cand"; break; }
+        done
+        if [ -z "$_ko" ]; then
+            _ko="$(find /lib/modules -name '8821cs.ko' -o -name 'rtl8821cs.ko' 2>/dev/null | head -1)"
+        fi
+        if [ -n "$_ko" ]; then
+            echo "my355: insmod $_ko"
+            insmod "$_ko" 2>/dev/null || true
+        else
+            echo "my355: no RK3566 wifi .ko found under /lib/modules"
+        fi
+    fi
+
+    # Poll for wlan0 to enumerate after the SDIO probe (the chip is behind the SDIO
+    # controller -- enumeration is not instant). Up to 10s, polled.
+    _i=0
+    while [ "$_i" -lt 10 ]; do
+        _my355_wlan0_present && { echo "my355: wlan0 enumerated after ${_i}s"; return 0; }
+        _i=$((_i + 1)); sleep 1
+    done
+    echo "my355: wlan0 did NOT enumerate within 10s after module load"
+    return 1
+}
+
+# --- shared Wi-Fi association hardening (unified-release, 2026-06-30) ----------
+# Used ONLY by the wpa_supplicant/udhcpc bring-up branches that were racing DHCP
+# ahead of authentication (my282, my355). NOT called from miyoomini (proven
+# reference path -- left byte-identical), rg35xxplus (systemd-networkd owns DHCP)
+# or rgb30 (connman owns association). Driver-agnostic on purpose.
+_wpa_cli_bin() {
+    if [ -x /customer/app/wpa_cli ]; then echo /customer/app/wpa_cli; else echo wpa_cli; fi
+}
+
+# Disable Wi-Fi power management. An interface that drops moments after coming up is
+# the classic power-save signature (confirmed on my355: wlan0 vanished mid-DHCP).
+# Best-effort: only if this device actually ships `iw` (8188fu has none -> skipped).
+_wifi_power_save_off() {
+    if command -v iw >/dev/null 2>&1; then
+        echo "wifi: disabling power_save on wlan0"
+        iw dev wlan0 set power_save off 2>/dev/null || true
+    fi
+}
+
+# Are we associated? Prefer wpa_cli (wpa_state=COMPLETED); fall back to `iw link`.
+_wifi_associated() {
+    _wc="$(_wpa_cli_bin)"
+    if command -v "$_wc" >/dev/null 2>&1 || [ -x "$_wc" ]; then
+        "$_wc" -i wlan0 status 2>/dev/null | grep -q "^wpa_state=COMPLETED" && return 0
+    fi
+    if command -v iw >/dev/null 2>&1; then
+        iw dev wlan0 link 2>/dev/null | grep -qi "Connected to" && return 0
+    fi
+    return 1
+}
+
+# Poll for association up to ~15s BEFORE starting udhcpc, so DHCP cannot race ahead
+# of auth. Returns 0 associated, 2 if wlan0 disappeared (radio dropped), 1 timeout.
+_wifi_wait_assoc() {
+    _w=0
+    while [ "$_w" -lt 15 ]; do
+        _wifi_associated && { echo "wifi: associated after ${_w}s"; return 0; }
+        [ -d /sys/class/net/wlan0 ] || { echo "wifi: wlan0 disappeared during association"; return 2; }
+        _w=$((_w + 1)); sleep 1
+    done
+    echo "wifi: association did NOT complete within 15s"
+    return 1
+}
+
+# ONE radio re-enumeration (down/up). Deliberately single-shot -- never loop
+# (respects the documented 8188fu USB-radio wedge: repeated re-enum can hang it).
+_wifi_reenum_once() {
+    echo "wifi: single radio re-enum (wlan0 down/up)"
+    ifconfig wlan0 down 2>/dev/null || ip link set wlan0 down 2>/dev/null || true
+    sleep 1
+    ifconfig wlan0 up 2>/dev/null || ip link set wlan0 up 2>/dev/null || true
+    sleep 2
+}
+
+main() {
+    if [ "$PLATFORM" = "zero28" ]; then
+        # zero28 = Allwinner A133 (trimui-smart-pro / tg5040 hardware): identical wifi userland
+        # (system.json @ /mnt/UDISK, systemval, wpa_supplicant -c /etc/wifi/...). Treat as tg5040.
+        export PLATFORM="tg5040"
+    fi
+    if [ "$PLATFORM" = "tg3040" ] && [ -z "$DEVICE" ]; then
+        export DEVICE="brick"
+        export PLATFORM="tg5040"
+    fi
+
+    echo "Preparing to enable wifi..."
+    if [ "$PLATFORM" = "miyoomini" ] || [ "$PLATFORM" = "my282" ] || [ "$PLATFORM" = "my355" ] || [ "$PLATFORM" = "tg5040" ]; then
+        SYSTEM_JSON_PATH="/mnt/UDISK/system.json"
+        if [ "$PLATFORM" = "miyoomini" ]; then
+            SYSTEM_JSON_PATH="/appconfigs/system.json"
+        elif [ "$PLATFORM" = "my282" ]; then
+            SYSTEM_JSON_PATH="/config/system.json"
+        elif [ "$PLATFORM" = "my355" ]; then
+            SYSTEM_JSON_PATH="/userdata/system.json"
+        fi
+        [ ! -f "$SYSTEM_JSON_PATH" ] && echo '{"wifi": 0}' >"$SYSTEM_JSON_PATH"
+        [ ! -s "$SYSTEM_JSON_PATH" ] && echo '{"wifi": 0}' >"$SYSTEM_JSON_PATH"
+
+        if [ -x /usr/trimui/bin/systemval ]; then
+            /usr/trimui/bin/systemval wifi 1
+        else
+            chmod +x "$PAK_DIR/bin/$architecture/jq"
+            jq '.wifi = 1' "$SYSTEM_JSON_PATH" >"/tmp/system.json.tmp"
+            mv "/tmp/system.json.tmp" "$SYSTEM_JSON_PATH"
+        fi
+    fi
+
+    if command -v rfkill >/dev/null 2>&1; then
+        echo "Unblocking wireless..."
+        rfkill unblock wifi 2>/dev/null || true
+    fi
+
+    echo "Starting wpa_supplicant..."
+    if [ "$PLATFORM" = "miyoomini" ]; then
+        killall wpa_supplicant || true
+        killall udhcpc || true
+        if ! grep -c 8188fu /proc/modules; then
+            insmod "$PAK_DIR/res/miyoomini/8188fu.ko"
+        fi
+
+        /customer/app/wpa_cli -i wlan0 disconnect
+        /customer/app/wpa_cli -i wlan0 terminate
+        /customer/app/wpa_cli -i wlan0 reconfigure
+
+        ifconfig lo up
+        /customer/app/axp_test wifion
+        sleep 2
+        ifconfig wlan0 up
+        /customer/app/wpa_supplicant -B -D nl80211 -iwlan0 -c /appconfigs/wpa_supplicant.conf
+        ln -sf /dev/null /tmp/udhcpc.log
+        udhcpc -i wlan0 -s /etc/init.d/udhcpc.script &
+
+        /customer/app/wpa_cli -i wlan0 reconnect
+        iw dev wlan0 set power_save off
+    elif [ "$PLATFORM" = "tg5040" ]; then
+        killall -15 wpa_supplicant || true
+        killall -15 udhcpc || true
+        ifconfig wlan0 up || true
+        wpa_supplicant -B -D nl80211 -iwlan0 -c /etc/wifi/wpa_supplicant.conf -O /etc/wifi/sockets >/tmp/wpa_supplicant.log
+        cat /tmp/wpa_supplicant.log
+        if grep -q "Delete '/etc/wifi/sockets/wlan0' manually if it is not used anymore" /tmp/wpa_supplicant.log; then
+            killall -15 wpa_supplicant
+            rm -f /etc/wifi/sockets/wlan0
+            wpa_supplicant -B -D nl80211 -iwlan0 -c /etc/wifi/wpa_supplicant.conf -O /etc/wifi/sockets
+        fi
+        rm -f /tmp/wpa_supplicant.log
+
+        if ! pgrep wpa_supplicant; then
+            echo "Failed to start wpa_supplicant"
+            return 1
+        fi
+        udhcpc -i wlan0 -n &
+    elif [ "$PLATFORM" = "my282" ]; then
+        killall -9 wpa_supplicant || true
+        killall -9 udhcpc || true
+        ifconfig wlan0 up || true
+        if ! /etc/init.d/wpa_supplicant start; then
+            echo "Failed to start wpa_supplicant via init.d"
+        fi
+
+        if ! pgrep wpa_supplicant; then
+            echo "Failed to start wpa_supplicant"
+            return 1
+        fi
+        # Harden association (8188fu / nl80211): kill power-save, then WAIT for the
+        # link to authenticate before DHCP. On timeout/drop do ONE re-enum + wpa
+        # restart, then try once more -- never loop (8188fu wedge).
+        _wifi_power_save_off
+        if ! _wifi_wait_assoc; then
+            _wifi_reenum_once
+            /etc/init.d/wpa_supplicant start || true
+            _wifi_wait_assoc || echo "my282: association incomplete; starting udhcpc anyway"
+        fi
+        ( (udhcpc -i wlan0 -q &) &)
+    elif [ "$PLATFORM" = "my355" ]; then
+        killall -9 wpa_supplicant || true
+        killall -9 udhcpc || true
+        # Load the RK3566 (RTL8821CS SDIO) driver and wait for wlan0 to appear BEFORE
+        # touching the interface -- on this device the module is not pre-loaded, so the
+        # old straight-to-`ifconfig wlan0 up` path died with "No such device".
+        if ! _my355_load_wifi_module; then
+            echo "Wi-Fi module did not produce wlan0; aborting bring-up"
+            return 1
+        fi
+        ifconfig wlan0 up || true
+        wpa_supplicant -B -D nl80211 -iwlan0 -c /userdata/cfg/wpa_supplicant.conf
+
+        if ! pgrep wpa_supplicant; then
+            echo "Failed to start wpa_supplicant"
+            return 1
+        fi
+        # Confirmed on-hardware bug: wlan0 dropped right after coming up and udhcpc
+        # ran before auth ("SIOCGIFINDEX: No such device"). Kill power-save (the drop
+        # signature; rg35xxplus already does this), WAIT for COMPLETED before DHCP,
+        # and on timeout/drop do ONE re-enum + module reload + wpa restart, then retry.
+        _wifi_power_save_off
+        if ! _wifi_wait_assoc; then
+            _wifi_reenum_once
+            _my355_load_wifi_module || true
+            ifconfig wlan0 up || true
+            wpa_supplicant -B -D nl80211 -iwlan0 -c /userdata/cfg/wpa_supplicant.conf
+            _wifi_wait_assoc || echo "my355: association incomplete; starting udhcpc anyway"
+        fi
+        ( (udhcpc -i wlan0 -q &) &)
+    elif [ "$PLATFORM" = "rg35xxplus" ]; then
+        ip link set wlan0 up
+        iw dev wlan0 set power_save off
+
+        systemctl start wpa_supplicant || true
+        systemctl start systemd-networkd || true
+        netplan apply
+    elif [ "$PLATFORM" = "rgb30" ]; then
+        # PowKiddy RGB30 runs a JELOS/LibreELEC host: Wi-Fi is owned by the system (connman/systemd
+        # handle DHCP), driven by wifictl + persisted get_setting/set_setting. There is no
+        # wpa_supplicant.conf / udhcpc here. Credentials are written by the lib's _wifi_write_config
+        # (set_setting) BEFORE this runs (the rg35xxplus write-config-first pattern). We only power the
+        # radio rail on; connman associates + leases. Readiness is /sys/class/net/wlan0/operstate.
+        . /etc/profile 2>/dev/null || true
+        if command -v wifictl >/dev/null 2>&1; then
+            wifictl enable &
+        else
+            echo "rgb30: wifictl not found"
+            return 1
+        fi
+    else
+        echo "$PLATFORM is not a supported platform for Wifi.pak"
+        return 1
+    fi
+}
+
+main "$@"

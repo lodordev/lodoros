@@ -1,0 +1,107 @@
+#!/bin/sh
+# romm-syncd — periodic, charging-gated, WiFi-dark save sync.
+#
+# A tiny POSIX-sh loop (NOT a resident Go process — on 128MB the daemon must hold ~nothing and only
+# spawn the short-lived sync binary per cycle). Launched DETACHED from auto.sh so it can never delay
+# boot. Polls every POLL s and acts only every INTERVAL s, and only when ALL gates hold: charging,
+# not in a game, credentials present. No sync at boot (clock not yet set, user wants to play).
+
+set -u
+SDCARD="${SDCARD_PATH:-/mnt/SDCARD}"
+PLAT="${PLATFORM:-miyoomini}"
+PAK="$SDCARD/Tools/$PLAT/Lodor.pak"
+LOG="$PAK/syncd.log"
+WIFI_LOG="$LOG"
+
+. "$PAK/lib/romm-sync-lib.sh" || exit 1
+
+POLL=60
+INTERVAL="${ROMM_SYNC_INTERVAL:-1800}"   # act at most every 30 min
+INGAME_LOCK="/tmp/romm-in-game"
+LAST_FULL="/tmp/romm-last-full-sync"
+FLUSH_INTERVAL="${ROMM_FLUSH_INTERVAL:-300}"   # off-charge: flush queued saves at most every 5 min
+PENDING_FILE="$PAK/pending-saves.txt"
+
+log() { echo "$(date +'%F %T') $1" >> "$LOG"; }
+
+# has_pending — are there unsynced saves queued (a non-empty pending-saves.txt)? Cheap file test, no
+# WiFi. Gates the off-charge flush so the radio only ever wakes on battery when there's progress to
+# protect; an empty queue means no wakeup.
+has_pending() { [ -s "$PENDING_FILE" ]; }
+
+not_in_game() {
+	[ -f "$INGAME_LOCK" ] || return 0
+	pid="$(cat "$INGAME_LOCK" 2>/dev/null)"
+	if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then return 1; fi
+	rm -f "$INGAME_LOCK" 2>/dev/null   # stale (game was kill-9'd) — reap and proceed
+	return 0
+}
+
+# last_attempt is a daemon-LOCAL timer that defers the first cycle by INTERVAL and paces subsequent
+# ones. It is deliberately NOT the shared freshness file: $LAST_FULL is written ONLY on a real
+# successful sync, because the minarch shim reads it to decide whether to skip the pre-game pull.
+# Writing it at boot would make the shim wrongly think a sync just happened and skip pulls for 30 min.
+# On exit/kill we only DROP THE LOCK (wifi_release) — we do NOT power the radio down. Per the
+# 2026-06-25 rearchitecture the radio is left UP; only the user (SELECT toggle) or uninstall powers it
+# off. A daemon auto-power-down on exit was part of the between-pass dropping we removed. wifi_release
+# is owner-scoped, so this no-ops unless we hold the lock.
+trap 'wifi_release' EXIT INT TERM HUP QUIT
+
+last_attempt=$(date +%s)
+last_flush=$(date +%s)   # defer the first off-charge flush by FLUSH_INTERVAL (keep boot quiet)
+log "romm-syncd started (interval=${INTERVAL}s, poll=${POLL}s)"
+
+while :; do
+	sleep "$POLL"
+	# (No reaper anymore: we never power the radio down automatically. The old wifi_reap call lived
+	# here and was the thing dropping Wi-Fi between passes — it is intentionally removed.)
+	now=$(date +%s)
+	not_in_game   || continue
+	creds_present || continue
+
+	# Decide what (if anything) to do this poll:
+	#   FULL  — charging + every INTERVAL: the daemon's main cycle (flush pending saves + refresh the
+	#           cross-device Continue cache). Heavy-ish, so it stays charging-gated as before.
+	#   FLUSH — off-charge but there ARE queued saves: protect progress by pushing them even on
+	#           battery, at most every FLUSH_INTERVAL, and ONLY when something is pending. This is the
+	#           change that gets a save you made off-charge up to the server WITHOUT a manual Sync Now
+	#           or waiting to plug in. Once the queue clears, no more wakeups until your next save.
+	mode=""
+	if [ $((now - last_attempt)) -ge "$INTERVAL" ] && is_charging; then
+		mode=full
+	elif [ $((now - last_flush)) -ge "$FLUSH_INTERVAL" ] && has_pending; then
+		mode=flush
+	fi
+	[ -n "$mode" ] || continue
+
+	# Try the radio. "busy" (another actor holds it) must NOT consume the timer — retry next poll;
+	# a sync IS happening, just not ours. Only a real attempt advances the timer, so we never cycle
+	# the radio every poll on a dead network.
+	wifi_acquire bg; acq=$?   # daemon is lowest priority — never preempts a user action
+	if [ "$acq" -eq 2 ]; then
+		log "wifi busy (another actor); retry next poll"
+		continue
+	fi
+	now=$(date +%s)
+	[ "$mode" = full ] && last_attempt=$now
+	last_flush=$now
+	if [ "$acq" -eq 0 ]; then
+		set_clock || log "clock set failed"
+		if [ "$mode" = full ]; then
+			run_sync >> "$LOG" 2>&1; rc=$?
+			wifi_release
+			if [ "$rc" -eq 0 ]; then
+				date +%s > "$LAST_FULL"   # shared: a real full sync happened (shim reads this)
+				log "sync ok"
+			else
+				log "sync rc=$rc (retry next interval)"
+			fi
+		else
+			run_sync --push-pending >> "$LOG" 2>&1; rc=$?
+			wifi_release
+			log "flush rc=$rc (off-charge pending-save push)"
+		fi
+	else
+		log "wifi up but no usable link; back off"   # acq=1
+	fi
+done

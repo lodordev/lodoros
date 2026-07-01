@@ -1,0 +1,14 @@
+#!/bin/sh
+# wifi-toggle — SELECT on the lodor main menu flips WiFi on/off. minui backgrounds this (async), so it
+# returns fast; MinUI's built-in online indicator reflects the new state once the radio settles. Reuses
+# the proven wifi lib so the mutex / keep-warm state stays coherent with syncs.
+SDCARD="${SDCARD_PATH:-/mnt/SDCARD}"
+PLAT="${PLATFORM:-miyoomini}"
+. "$SDCARD/Tools/$PLAT/Lodor.pak/lib/romm-sync-lib.sh" 2>/dev/null || exit 1
+if [ "$(cat /sys/class/net/wlan0/operstate 2>/dev/null)" = "up" ]; then
+	_wlog "toggle: WiFi up -> off" 2>/dev/null
+	wifi_shutdown
+else
+	_wlog "toggle: WiFi off -> on" 2>/dev/null
+	if wifi_acquire fg; then set_clock; wifi_release; fi
+fi

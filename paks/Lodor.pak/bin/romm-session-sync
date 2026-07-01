@@ -1,0 +1,55 @@
+#!/bin/sh
+# romm-session-sync <pull|push> <rom-path> — sync ONE ROM's save, WiFi-dark. Called by the minarch
+# shim around a game launch. Taking the ROM path as an argument keeps quoting safe (ROM names have
+# spaces and parens). Always exits 0 — a game launch must never be blocked by sync.
+
+PHASE="$1"
+ROM="$2"
+[ -n "$PHASE" ] && [ -n "$ROM" ] || exit 0
+
+SDCARD="${SDCARD_PATH:-/mnt/SDCARD}"
+PLAT="${PLATFORM:-miyoomini}"
+PAK="$SDCARD/Tools/$PLAT/Lodor.pak"
+WIFI_LOG="$PAK/session.log"
+
+. "$PAK/lib/romm-sync-lib.sh" 2>/dev/null || exit 0
+SESSION_LOG="$PAK/session.log"
+
+# Always power the radio down if we're killed (e.g. the shim caps the pull with `timeout`, or OOM).
+# wifi_release is owner-safe → no-ops unless we hold it.
+trap 'wifi_release' EXIT INT TERM HUP QUIT
+
+if [ "$PHASE" = "pull" ]; then
+	# Skip the pre-game pull if a full sync already refreshed everything recently.
+	now=$(date +%s); last=$(cat /tmp/romm-last-full-sync 2>/dev/null || echo 0)
+	if [ $((now - last)) -lt "${ROMM_SYNC_INTERVAL:-1800}" ]; then
+		echo "$(date +'%F %T') [pull] skipped (fresh) rom=$ROM" >> "$SESSION_LOG"
+		exit 0
+	fi
+	NET_TIMEOUT=6   # fail fast pre-game; the daemon owns the patient path
+fi
+
+# Pull (user launching a game) is foreground and PREEMPTS a push; the post-game push is preemptible.
+[ "$PHASE" = "push" ] && _ACQ=push || _ACQ=fg
+if wifi_acquire "$_ACQ"; then
+	set_clock >/dev/null 2>&1
+	# Two targeted engine modes, one per phase:
+	#  PHASE=pull (pre-game): --sync-save <rom> does a newest-wins pull then a push the engine
+	#    dedupes to a no-op via AlreadyOnServer MD5 when the local save is unchanged.
+	#  PHASE=push (post-game HYBRID): --push-save <rom> pushes the changed save DIRECTLY and, on a
+	#    verified land, writes last-synced.txt (the launcher's synced-✓ signal); a push that does
+	#    NOT land is staged into pending-saves.txt for later upload. The shim only invokes the push
+	#    phase when WiFi is ALREADY up, so wifi_acquire reuses the warm link (no cold bring-up on a
+	#    quit) and the radio is never powered down here (wifi_release drops the mutex only).
+	if [ "$PHASE" = push ]; then
+		run_sync --push-save "$ROM" >> "$SESSION_LOG" 2>&1
+	else
+		run_sync --sync-save "$ROM" >> "$SESSION_LOG" 2>&1
+	fi
+	rc=$?
+	wifi_release
+	echo "$(date +'%F %T') [$PHASE] rom=$ROM rc=$rc" >> "$SESSION_LOG"
+else
+	echo "$(date +'%F %T') [$PHASE] wifi busy/unavailable rom=$ROM" >> "$SESSION_LOG"
+fi
+exit 0
