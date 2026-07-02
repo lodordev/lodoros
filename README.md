@@ -25,7 +25,9 @@ Miyoo Mini Plus · Miyoo A30 · Miyoo Flip V2 · Anbernic H700 family (RG35XX Pl
 TrimUI devices are served separately by the no-fork **Lodor-NextUI** tool.
 
 ## Requirements
-A self-hosted **RomM** server + a supported device. **BYOB** — LodorOS never ships BIOS/firmware; supply your own for systems that need them.
+- A self-hosted **RomM** server, **4.8.0 or newer** (the device-pairing API ships in 4.8.0 — older servers fail at pairing).
+- A supported device (see above).
+- **BYOB** — LodorOS never ships BIOS/firmware; supply your own for systems that need them.
 
 ## Screenshots
 
