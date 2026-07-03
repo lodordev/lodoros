@@ -1,0 +1,49 @@
+#!/bin/sh
+# wifi-reset — re-enumerate the 8188fu USB radio to clear the "associates but no DHCP lease" wedge.
+# USB unbind+rebind re-enumerates WITHOUT rmmod (rmmod hard-hangs the 8188fu) and WITH the AXP power
+# rail LEFT ON. Powering the rail off first removes the USB device, so the unbind then fails with
+# "write error: No such device" and the wedge is never cleared (the original bug). Keep it powered.
+SDCARD="${SDCARD_PATH:-/mnt/SDCARD}"
+PLAT="${PLATFORM:-miyoomini}"
+LOG="$SDCARD/Tools/$PLAT/Lodor.pak/wifi-reset.log"
+log(){ echo "$(date +'%F %T') $1" >> "$LOG" 2>/dev/null; }
+
+log "=== reset start ==="
+killall -9 udhcpc 2>/dev/null; killall -9 wpa_supplicant 2>/dev/null
+sleep 1
+
+USBDEV=""
+if [ -e /sys/class/net/wlan0/device ]; then
+	p=$(readlink -f /sys/class/net/wlan0/device 2>/dev/null)
+	while [ -n "$p" ] && [ "$p" != "/" ]; do
+		b=$(basename "$p")
+		case "$b" in
+			*:*) p=$(dirname "$p") ;;
+			[0-9]*-*) USBDEV="$b"; break ;;
+			*) p=$(dirname "$p") ;;
+		esac
+	done
+fi
+if [ -z "$USBDEV" ]; then
+	for dv in /sys/bus/usb/devices/*/idVendor; do
+		[ -f "$dv" ] || continue
+		if [ "$(cat "$dv" 2>/dev/null)" = "0bda" ]; then USBDEV=$(basename "$(dirname "$dv")"); break; fi
+	done
+fi
+log "radio usb device = ${USBDEV:-NONE-FOUND}"
+
+# Primary: USB re-enumerate with the rail LEFT POWERED (do NOT axp-wifioff first).
+if [ -n "$USBDEV" ] && [ -w /sys/bus/usb/drivers/usb/unbind ]; then
+	echo "$USBDEV" > /sys/bus/usb/drivers/usb/unbind 2>>"$LOG" && log "usb unbind $USBDEV"
+	sleep 3
+	echo "$USBDEV" > /sys/bus/usb/drivers/usb/bind 2>>"$LOG" && log "usb rebind $USBDEV"
+	sleep 3
+else
+	# Fallback ONLY if there is no bindable USB node: power-cycle the rail.
+	log "WARN: no bindable usb device / unbind node — rail-toggle fallback"
+	[ -x /customer/app/axp_test ] && /customer/app/axp_test wifioff >/dev/null 2>&1 && log "axp wifioff (fallback)"
+	sleep 2
+	[ -x /customer/app/axp_test ] && /customer/app/axp_test wifion >/dev/null 2>&1 && log "axp wifion (fallback)"
+	sleep 2
+fi
+log "=== reset done ==="

@@ -1,0 +1,9 @@
+{
+  "name": "DC",
+  "type": "EMU",
+  "description": "LodorOS thin shim - runs Dreamcast on the device's stock Anbernic RetroArch (ships no emulator). Approach credit: ryanmsartor.",
+  "platforms": [
+    "rg35xxplus"
+  ],
+  "launch": "launch.sh"
+}

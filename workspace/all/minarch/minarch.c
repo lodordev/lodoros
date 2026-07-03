@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <stdarg.h>
 #include <msettings.h>
+#include "cheevos.h"
 
 #include <unistd.h>
 #include <fcntl.h>
@@ -12,12 +13,14 @@
 #include <errno.h>
 #include <zlib.h>
 #include <pthread.h>
+#include <ctype.h> // lodor cheats (#150): isspace for the .cht parser
 
 #include "libretro.h"
 #include "defines.h"
 #include "api.h"
 #include "utils.h"
 #include "scaler.h"
+#include "ma_glhw.h"
 
 ///////////////////////////////////////
 
@@ -78,7 +81,8 @@ static struct Core {
 	const char states_dir[MAX_PATH]; // eg. /mnt/sdcard/.userdata/arm-480/GB-gambatte
 	const char saves_dir[MAX_PATH]; // eg. /mnt/sdcard/Saves/GB
 	const char bios_dir[MAX_PATH]; // eg. /mnt/sdcard/Bios/GB
-	
+	const char cheats_dir[MAX_PATH]; // lodor cheats (#150): eg. /mnt/sdcard/Cheats/GB
+
 	double fps;
 	double sample_rate;
 	double aspect_ratio;
@@ -93,6 +97,8 @@ static struct Core {
 	
 	void (*reset)(void);
 	void (*run)(void);
+	void (*cheat_reset)(void); // lodor cheats (#150): retro_cheat_reset
+	void (*cheat_set)(unsigned id, bool enabled, const char* code); // lodor cheats (#150): retro_cheat_set
 	size_t (*serialize_size)(void);
 	bool (*serialize)(void *data, size_t size);
 	bool (*unserialize)(const void *data, size_t size);
@@ -566,11 +572,13 @@ error:
 	
 	fast_forward = was_ff;
 }
+static void Lodor_writeAutoShot(void); // lodor §gameswitch (#149) — defined with the menu machinery
 static void State_autosave(void) {
 	int last_state_slot = state_slot;
 	state_slot = AUTO_RESUME_SLOT;
 	State_write();
 	state_slot = last_state_slot;
+	Lodor_writeAutoShot(); // lodor §gameswitch (#149): autosave always leaves a fresh capture
 }
 static void State_resume(void) {
 	if (!exists(RESUME_SLOT_PATH)) return;
@@ -2009,6 +2017,18 @@ static bool environment_callback(unsigned cmd, void *data) { // copied from pico
 	}
 	// RETRO_ENVIRONMENT_SET_MEMORY_MAPS (36 | RETRO_ENVIRONMENT_EXPERIMENTAL)
 	// RETRO_ENVIRONMENT_GET_LANGUAGE 39
+	case RETRO_ENVIRONMENT_SET_HW_RENDER: { /* 14 */
+		// Additive GL hw-render path (ma_glhw). Returns false when GL is not
+		// compiled/usable so the core can fall back to software or fail cleanly
+		// instead of rendering into a context that does not exist.
+		struct retro_hw_render_callback *cb = (struct retro_hw_render_callback*)data;
+		if (GLHW_setHWRender(cb)) {
+			LOG_info("SET_HW_RENDER: honoring GL request (type=%u v%u.%u)\n", cb->context_type, cb->version_major, cb->version_minor);
+			break;
+		}
+		LOG_info("SET_HW_RENDER: GL path unavailable; refusing\n");
+		return false;
+	}
 	case RETRO_ENVIRONMENT_GET_CURRENT_SOFTWARE_FRAMEBUFFER: { /* (40 | RETRO_ENVIRONMENT_EXPERIMENTAL) */
 		// puts("RETRO_ENVIRONMENT_GET_CURRENT_SOFTWARE_FRAMEBUFFER");
 		break;
@@ -2842,10 +2862,16 @@ static void video_refresh_callback_main(const void *data, unsigned width, unsign
 	
 	GFX_blitRenderer(&renderer);
 	
-	if (!thread_video) GFX_flip(screen);
+	if (!thread_video) { CHEEVOS_render(screen); GFX_flip(screen); }
 	last_flip_time = SDL_GetTicks();
 }
 static void video_refresh_callback(const void *data, unsigned width, unsigned height, size_t pitch) {
+	if (data==RETRO_HW_FRAME_BUFFER_VALID) { // GL hw-rendered frame: read FBO back to RGB565, reuse software present path
+		unsigned hwpitch = 0;
+		const void* px = GLHW_active() ? GLHW_readbackRGB565(width, height, &hwpitch) : NULL;
+		if (px) video_refresh_callback_main(px, width, height, hwpitch);
+		return;
+	}
 	if (!data) return;
 	
 	if (thread_video) {
@@ -2882,6 +2908,279 @@ static size_t audio_sample_batch_callback(const int16_t *data, size_t frames) {
 };
 
 ///////////////////////////////////////
+// lodor cheats (#150): per-game cheat support, written CLEAN-ROOM from the public
+// RetroArch .cht format description (`cheats = N` header plus cheatN_desc /
+// cheatN_code / cheatN_enable key = value lines, values conventionally double-
+// quoted) and the standard libretro cheat API already declared in libretro.h
+// (retro_cheat_reset / retro_cheat_set). This REPLACES the earlier NextUI-derived
+// port: NextUI is GPL-3 and LodorOS ships no NextUI code (see CREDITS.md).
+//
+// Lifecycle: parsed once at rom start (Core_load), freed at Core_quit. Bounded:
+// at most LODOR_CHEAT_MAX cheats, desc/code strings capped at their _MAX. When no
+// .cht exists for the running game the whole subsystem is inert — no menu entry,
+// no core calls, no files written; zero behavior change.
+//
+// Discovery: SDCARD/Cheats/<TAG>/<rom>.cht where <rom> is the ROM basename with
+// any engine marker (✓/✘/[v]/[^]) stripped — a marker flip RENAMES the ROM file,
+// and the cheat file must survive it (same convention as the launcher sidecars).
+// Tried with the ROM extension kept ("Game.smc.cht", MinUI-family style), then
+// with it dropped ("Game.cht", RetroArch style).
+//
+// Persistence: SHARED_USERDATA/.minui/<EMU>/<rom>.cheats.txt — one enabled cheat
+// DESC per line, verbatim. Descs rather than indices because users edit .cht
+// files: one inserted/reordered cheat silently shifts every index after it and a
+// stale index re-enables the WRONG cheat, while the desc is the stable human key;
+// verbatim rather than hashed so the sidecar stays debuggable by eye. A desc that
+// no longer matches simply stays off — the safe default. If the sidecar exists it
+// is authoritative for the whole set (an empty file = everything off); if it
+// doesn't, the .cht's own cheatN_enable flags seed the initial state.
+
+#define LODOR_CHEAT_MAX 128       // sane cap; files declaring more are truncated
+#define LODOR_CHEAT_DESC_MAX 256  // bytes, incl. NUL
+#define LODOR_CHEAT_CODE_MAX 1024 // bytes, incl. NUL
+
+typedef struct {
+	char* desc;  // never NULL for i < count (missing descs fall back to "Cheat N")
+	char* code;  // never NULL for i < count (entries without a code are dropped)
+	int enabled;
+} LodorCheat;
+static struct {
+	int count;
+	LodorCheat item[LODOR_CHEAT_MAX];
+	char sidecar_path[MAX_PATH]; // empty until a .cht was found for this game
+} lodor_cheats = {0};
+
+// mirrors minui.c Lodor_stripMarker (kept in sync by hand — the launcher .c files
+// don't share a lodor common yet): drop any known engine marker prefix (see
+// engine/platform/marker.go) from a ROM basename.
+static const char* Lodor_stripMarker(const char* base) {
+	static const char* all[] = { "\xE2\x9C\x93 ", "\xE2\x9C\x98 ", "[v] ", "[^] " };
+	for (int i=0; i<4; i++) {
+		size_t l = strlen(all[i]);
+		if (strncmp(base, all[i], l)==0) return base + l;
+	}
+	return base;
+}
+
+// in-place value cleanup: trim surrounding whitespace, then strip one layer of
+// double quotes, resolving backslash escapes inside. Unquoted values pass through
+// as-is (tolerance for hand-written files); a missing closing quote is tolerated
+// (everything to end-of-line is taken).
+static char* Lodor_chtValue(char* v) {
+	while (isspace((unsigned char)*v)) v++;
+	size_t n = strlen(v);
+	while (n && isspace((unsigned char)v[n-1])) v[--n] = '\0';
+	if (v[0]=='"') {
+		char* w = v;
+		const char* r = v+1;
+		while (*r && *r!='"') {
+			if (*r=='\\' && r[1]) r++;
+			*w++ = *r++;
+		}
+		*w = '\0';
+	}
+	return v;
+}
+
+static char* Lodor_cheatStrdup(const char* s, size_t cap) { // cap incl. NUL
+	size_t n = strlen(s);
+	if (n > cap-1) n = cap-1;
+	char* out = malloc(n+1);
+	if (out) { memcpy(out, s, n); out[n] = '\0'; }
+	return out;
+}
+
+static void Lodor_cheatsFree(void) {
+	for (int i=0; i<LODOR_CHEAT_MAX; i++) {
+		free(lodor_cheats.item[i].desc); lodor_cheats.item[i].desc = NULL;
+		free(lodor_cheats.item[i].code); lodor_cheats.item[i].code = NULL;
+		lodor_cheats.item[i].enabled = 0;
+	}
+	lodor_cheats.count = 0;
+}
+
+// parse a .cht into lodor_cheats.item[]. Tolerant by design: CRLF and unquoted
+// values accepted; unknown keys (cheatN_address and friends from RA's memory-
+// patch cheats) ignored; out-of-range indices skipped; the `cheats = N` header
+// treated as advisory (we key off the cheatN_ lines actually present, so a
+// missing header costs nothing); a UTF-8 BOM is skipped; a missing or empty
+// cheatN_enable defaults to off; entries with no code are dropped (nothing to
+// hand the core); a missing desc falls back to "Cheat N". Over-long lines are
+// clipped at the buffer and the remainder swallowed. Returns the usable count.
+static int Lodor_cheatsParse(const char* path) {
+	FILE* f = fopen(path, "r");
+	if (!f) return 0;
+	{ // skip a UTF-8 BOM if present (Windows editors love to prepend one)
+		unsigned char bom[3];
+		if (fread(bom, 1, 3, f)!=3 || bom[0]!=0xEF || bom[1]!=0xBB || bom[2]!=0xBF) rewind(f);
+	}
+	char line[2048];
+	int max_seen = -1;
+	while (fgets(line, sizeof(line), f)) {
+		size_t len = strlen(line);
+		if (len==sizeof(line)-1 && line[len-1]!='\n') { // swallow the over-long tail
+			int ch; while ((ch=fgetc(f))!=EOF && ch!='\n');
+			LOG_warn("cheats: over-long line truncated in %s\n", path);
+		}
+		normalizeNewline(line);
+		trimTrailingNewlines(line);
+		char* eq = strchr(line, '=');
+		if (!eq) continue; // not a key = value line (blank, comment, garbage)
+		*eq = '\0';
+		char* key = line;
+		while (isspace((unsigned char)*key)) key++;
+		char* ke = key + strlen(key);
+		while (ke>key && isspace((unsigned char)ke[-1])) *--ke = '\0';
+		char* val = Lodor_chtValue(eq+1);
+		unsigned idx; char field[32];
+		if (sscanf(key, "cheat%u_%31s", &idx, field) == 2) {
+			if (idx >= LODOR_CHEAT_MAX) continue;
+			LodorCheat* c = &lodor_cheats.item[idx];
+			if (!strcmp(field, "desc")) {
+				if (!*val) continue; // empty desc: let the fallback name it
+				free(c->desc);
+				c->desc = Lodor_cheatStrdup(val, LODOR_CHEAT_DESC_MAX);
+			}
+			else if (!strcmp(field, "code")) {
+				if (!*val) continue;
+				free(c->code);
+				c->code = Lodor_cheatStrdup(val, LODOR_CHEAT_CODE_MAX);
+			}
+			else if (!strcmp(field, "enable") || !strcmp(field, "enabled")) {
+				c->enabled = (!strcasecmp(val, "true") || !strcmp(val, "1"));
+			}
+			else continue; // cheatN_address etc — not ours
+			if ((int)idx > max_seen) max_seen = (int)idx;
+		}
+		else if (!strcmp(key, "cheats")) { // advisory — warn when we cap
+			int declared = atoi(val);
+			if (declared > LODOR_CHEAT_MAX) LOG_warn("cheats: %s declares %i cheats, capped at %i\n", path, declared, LODOR_CHEAT_MAX);
+		}
+	}
+	fclose(f);
+	// compact: keep only entries with a code, preserving file order. The index in
+	// the COMPACTED table is the id we hand retro_cheat_set — our numbering, applied
+	// consistently on every reset+reapply, which is all the API asks of an id.
+	int w = 0;
+	for (int r=0; r<=max_seen; r++) {
+		LodorCheat* c = &lodor_cheats.item[r];
+		if (!c->code) { free(c->desc); c->desc = NULL; c->enabled = 0; continue; }
+		if (!c->desc) {
+			char fallback[32];
+			snprintf(fallback, sizeof(fallback), "Cheat %i", r+1);
+			c->desc = Lodor_cheatStrdup(fallback, LODOR_CHEAT_DESC_MAX);
+			if (!c->desc) { free(c->code); c->code = NULL; c->enabled = 0; continue; } // OOM: drop entry
+		}
+		if (w != r) {
+			lodor_cheats.item[w] = *c;
+			c->desc = NULL; c->code = NULL; c->enabled = 0; // moved, don't double-free
+		}
+		w++;
+	}
+	lodor_cheats.count = w;
+	return w;
+}
+
+// sidecar load: only when the file exists does it override the .cht enable flags
+// (authoritative for the whole set — see the format rationale above).
+static void Lodor_cheatsSidecarLoad(void) {
+	if (!lodor_cheats.sidecar_path[0]) return;
+	FILE* f = fopen(lodor_cheats.sidecar_path, "r");
+	if (!f) return; // no sidecar: keep the .cht's own enable flags
+	for (int i=0; i<lodor_cheats.count; i++) lodor_cheats.item[i].enabled = 0;
+	char line[LODOR_CHEAT_DESC_MAX+16];
+	while (fgets(line, sizeof(line), f)) {
+		normalizeNewline(line);
+		trimTrailingNewlines(line);
+		if (!line[0]) continue;
+		for (int i=0; i<lodor_cheats.count; i++)
+			if (!strcmp(line, lodor_cheats.item[i].desc)) lodor_cheats.item[i].enabled = 1;
+	}
+	fclose(f);
+}
+
+// sidecar save: called on every toggle (tiny file, rare event) so a power cut
+// loses nothing. Always writes — an all-off set writes an EMPTY file on purpose
+// (empty = authoritative all-off; deleting instead would resurrect the .cht's
+// enable flags on next boot). Atomic on FAT: temp + fsync + rename, never a
+// partial/zeroed file (the config.json lesson).
+static void Lodor_cheatsSidecarSave(void) {
+	if (!lodor_cheats.sidecar_path[0]) return;
+	char tmp[MAX_PATH+8];
+	snprintf(tmp, sizeof(tmp), "%s.tmp", lodor_cheats.sidecar_path);
+	FILE* f = fopen(tmp, "w");
+	if (!f) { // first write on a fresh card: the emu sidecar dir may not exist yet
+		char dir[MAX_PATH];
+		strncpy(dir, lodor_cheats.sidecar_path, sizeof(dir)-1); dir[sizeof(dir)-1] = '\0';
+		char* slash = strrchr(dir, '/');
+		if (slash) { *slash = '\0'; mkdir(dir, 0755); }
+		f = fopen(tmp, "w");
+		if (!f) return;
+	}
+	for (int i=0; i<lodor_cheats.count; i++)
+		if (lodor_cheats.item[i].enabled) fprintf(f, "%s\n", lodor_cheats.item[i].desc);
+	fflush(f);
+	fsync(fileno(f));
+	fclose(f);
+	rename(tmp, lodor_cheats.sidecar_path);
+}
+
+// lodor §override (#144/#153): the launcher exports LODOR_ROM_TAG (the ROM's FOLDER tag)
+// with every launch, so per-game overrides keep saves/states/.minui bookkeeping keyed by
+// the folder tag no matter which pak/core runs the game. Prefer it over re-deriving from
+// the rom path (identical when the path is intact; authoritative when a wrapper hands
+// minarch a relocated path). Fallback: MinUI's own folder-tag extraction.
+static void Lodor_tagName(const char* rom_path, char* out_tag, size_t outsz) {
+	const char* env = getenv("LODOR_ROM_TAG");
+	if (env && env[0]) {
+		strncpy(out_tag, env, outsz-1);
+		out_tag[outsz-1] = '\0';
+		return;
+	}
+	getEmuName(rom_path, out_tag);
+}
+
+// reset + reapply-all: on every change push the WHOLE enabled set (the robust
+// pattern — per-index updates are inconsistently supported across cores). Whether
+// a core actually honors retro_cheat_set is the core's business: the menu toggle
+// reflects OUR state only, no fake feedback.
+static void Lodor_cheatsApply(void) {
+	if (!lodor_cheats.count) return;                  // inert without a .cht
+	if (!core.cheat_reset || !core.cheat_set) return; // core has no cheat API
+	core.cheat_reset();
+	for (int i=0; i<lodor_cheats.count; i++)
+		if (lodor_cheats.item[i].enabled)
+			core.cheat_set((unsigned)i, true, lodor_cheats.item[i].code);
+}
+
+// rom-start entry point (Core_load, right after retro_load_game): discover the
+// .cht, parse it, restore the persisted enabled set. Apply is the caller's move.
+static void Lodor_cheatsInit(void) {
+	lodor_cheats.count = 0;
+	lodor_cheats.sidecar_path[0] = '\0';
+	if (!game.name[0]) return;
+	char stripped[MAX_PATH];
+	strncpy(stripped, Lodor_stripMarker(game.name), sizeof(stripped)-1);
+	stripped[sizeof(stripped)-1] = '\0';
+	char path[MAX_PATH];
+	snprintf(path, sizeof(path), "%s/%s.cht", core.cheats_dir, stripped); // ext kept
+	if (!exists(path)) {
+		char stem[MAX_PATH];
+		strcpy(stem, stripped);
+		char* dot = strrchr(stem, '.');
+		if (dot) *dot = '\0';
+		snprintf(path, sizeof(path), "%s/%s.cht", core.cheats_dir, stem); // ext dropped
+		if (!exists(path)) return; // no cheat file: subsystem stays inert
+	}
+	if (!Lodor_cheatsParse(path)) { Lodor_cheatsFree(); return; }
+	LOG_info("cheats: %i loaded from %s\n", lodor_cheats.count, path);
+	char emu_name[MAX_PATH]; // sidecar sits with the launcher's other per-game sidecars
+	Lodor_tagName(game.path, emu_name, sizeof(emu_name)); // §override (#153): folder tag, env-first
+	snprintf(lodor_cheats.sidecar_path, sizeof(lodor_cheats.sidecar_path), SHARED_USERDATA_PATH "/.minui/%s/%s.cheats.txt", emu_name, stripped);
+	Lodor_cheatsSidecarLoad();
+}
+
+///////////////////////////////////////
 
 void Core_getName(char* in_name, char* out_name) {
 	strcpy(out_name, basename(in_name));
@@ -2910,7 +3209,9 @@ void Core_open(const char* core_path, const char* tag_name) {
 	core.get_region = dlsym(core.handle, "retro_get_region");
 	core.get_memory_data = dlsym(core.handle, "retro_get_memory_data");
 	core.get_memory_size = dlsym(core.handle, "retro_get_memory_size");
-	
+	core.cheat_reset = dlsym(core.handle, "retro_cheat_reset"); // lodor cheats (#150)
+	core.cheat_set = dlsym(core.handle, "retro_cheat_set");     // lodor cheats (#150)
+
 	void (*set_environment_callback)(retro_environment_t);
 	void (*set_video_refresh_callback)(retro_video_refresh_t);
 	void (*set_audio_sample_callback)(retro_audio_sample_t);
@@ -2939,8 +3240,18 @@ void Core_open(const char* core_path, const char* tag_name) {
 	
 	sprintf((char*)core.config_dir, USERDATA_PATH "/%s-%s", core.tag, core.name);
 	sprintf((char*)core.states_dir, SHARED_USERDATA_PATH "/%s-%s", core.tag, core.name);
-	sprintf((char*)core.saves_dir, SDCARD_PATH "/Saves/%s", core.tag);
+	// MULTI-USER (approach #1): honor $SAVES_PATH (the per-platform boot script exports
+	// SAVES_PATH="$SDCARD_PATH/Saves/$LODOR_PROFILE", profile-namespaced) so the emulator
+	// writes the save into the SAME profile dir the engine syncs. Fall back to the compile-
+	// time macro when unset (single-user / tool launched outside the boot env) — keeping the
+	// historical path byte-identical. BIOS stays shared (macro), so only saves are per-user.
+	{
+		const char* sp = getenv("SAVES_PATH");
+		if (sp && *sp) sprintf((char*)core.saves_dir, "%s/%s", sp, core.tag);
+		else           sprintf((char*)core.saves_dir, SDCARD_PATH "/Saves/%s", core.tag);
+	}
 	sprintf((char*)core.bios_dir, SDCARD_PATH "/Bios/%s", core.tag);
+	sprintf((char*)core.cheats_dir, SDCARD_PATH "/Cheats/%s", core.tag); // lodor cheats (#150)
 	
 	char cmd[512];
 	sprintf(cmd, "mkdir -p \"%s\"; mkdir -p \"%s\"", core.config_dir, core.states_dir);
@@ -2967,9 +3278,19 @@ void Core_load(void) {
 	LOG_info("game path: %s (%i)\n", game_info.path, game.size);
 	
 	core.load_game(&game_info);
-	
+
+	// lodor cheats (#150): discover + parse this game's .cht, restore the persisted
+	// enabled set, then push it into the freshly loaded core (inert with no .cht).
+	Lodor_cheatsInit();
+	Lodor_cheatsApply();
+
 	SRAM_read();
 	RTC_read();
+	
+	// RetroAchievements (softcore): bring up rc_client (logs in from stored token)
+	// and identify this game now that core memory is valid (task #46).
+	CHEEVOS_init();
+	CHEEVOS_load_game((char*)core.tag, game_info.path, core.get_memory_data, core.get_memory_size);
 	
 	// NOTE: must be called after core.load_game!
 	struct retro_system_av_info av_info = {};
@@ -2983,6 +3304,15 @@ void Core_load(void) {
 	core.aspect_ratio = a;
 	
 	LOG_info("aspect_ratio: %f (%ix%i) fps: %f\n", a, av_info.geometry.base_width,av_info.geometry.base_height, core.fps);
+
+	// If a core requested SET_HW_RENDER, bring up the GL context + FBO now (after
+	// load_game + av_info, per the libretro hw-render contract) and context_reset it.
+	if (GLHW_requested()) {
+		if (GLHW_start(av_info.geometry.max_width, av_info.geometry.max_height))
+			LOG_info("GL hw render online (max %ux%u)\n", av_info.geometry.max_width, av_info.geometry.max_height);
+		else
+			LOG_error("GL hw render init FAILED -- core may not display\n");
+	}
 }
 void Core_reset(void) {
 	core.reset();
@@ -2991,9 +3321,12 @@ void Core_unload(void) {
 	SND_quit();
 }
 void Core_quit(void) {
+	GLHW_stop(); // tear down GL context/FBO (no-op if never started)
 	if (core.initialized) {
 		SRAM_write();
 		RTC_write();
+		CHEEVOS_unload();
+		Lodor_cheatsFree(); // lodor cheats (#150)
 		core.unload_game();
 		core.deinit();
 		core.initialized = 0;
@@ -3005,13 +3338,14 @@ void Core_close(void) {
 
 ///////////////////////////////////////
 
-#define MENU_ITEM_COUNT 5
+#define MENU_ITEM_COUNT 6
 #define MENU_SLOT_COUNT 8
 
 enum {
 	ITEM_CONT,
 	ITEM_SAVE,
 	ITEM_LOAD,
+	ITEM_FLASHBACK,
 	ITEM_OPTS,
 	ITEM_QUIT,
 };
@@ -3053,10 +3387,29 @@ static struct {
 		[ITEM_CONT] = "Continue",
 		[ITEM_SAVE] = "Save",
 		[ITEM_LOAD] = "Load",
+		[ITEM_FLASHBACK] = "Flashback",
 		[ITEM_OPTS] = "Options",
 		[ITEM_QUIT] = "Quit",
 	}
 };
+
+// lodor §gameswitch (#149): transient auto-capture for the launcher's Game Switcher —
+// <SHARED_USERDATA>/.minui/<EMU>/<game>.auto.bmp (contract path), written on autosave
+// (sleep / quicksave-poweroff via State_autosave) and on menu Quit, using the same
+// SDL_SaveBMP-of-renderer.src mechanism as Menu_saveState. Transient by design: one
+// file per game, overwritten on every capture, no resident buffers.
+static void Lodor_writeAutoShot(void) {
+	if (!game.is_open || !menu.minui_dir[0]) return;
+	char path[MAX_PATH];
+	sprintf(path, "%s/%s.auto.bmp", menu.minui_dir, game.name);
+	SDL_Surface* bitmap = menu.bitmap; // menu open: reuse its gameplay snapshot
+	if (!bitmap && renderer.src)       // in-game: wrap the live frame, zero-copy
+		bitmap = SDL_CreateRGBSurfaceFrom(renderer.src, renderer.true_w, renderer.true_h, FIXED_DEPTH, renderer.src_p, RGBA_MASK_565);
+	if (!bitmap) return;
+	SDL_RWops* out = SDL_RWFromFile(path, "wb");
+	if (out) SDL_SaveBMP_RW(bitmap, out, 1);
+	if (bitmap!=menu.bitmap) SDL_FreeSurface(bitmap);
+}
 
 void Menu_init(void) {
 	menu.overlay = SDL_CreateRGBSurface(SDL_SWSURFACE,DEVICE_WIDTH,DEVICE_HEIGHT,FIXED_DEPTH,RGBA_MASK_AUTO);
@@ -3064,7 +3417,7 @@ void Menu_init(void) {
 	SDL_FillRect(menu.overlay, NULL, 0);
 	
 	char emu_name[256];
-	getEmuName(game.path, emu_name);
+	Lodor_tagName(game.path, emu_name, sizeof(emu_name)); // §override (#153): #149 captures + slots key by folder tag, env-first
 	sprintf(menu.minui_dir, SHARED_USERDATA_PATH "/.minui/%s", emu_name);
 	mkdir(menu.minui_dir, 0755);
 
@@ -3563,22 +3916,75 @@ static int OptionQuicksave_onConfirm(MenuList* list, int i) {
 	PWR_powerOff();
 }
 
+// lodor cheats (#150): the in-game Options > Cheats submenu — one On/Off toggle
+// per parsed cheat, matching the existing Option* list/toggle idiom. The item
+// list is built when the submenu opens and freed when it closes (transient —
+// the only resident state is the parsed cheat table itself); names are borrowed
+// from the cheat table, never copied. A on a row pops the full (unclipped)
+// description. Toggling reapplies the whole set to the live core and persists
+// the sidecar immediately, so a power cut loses nothing.
+static int LodorCheats_onChange(MenuList* list, int i) {
+	if (i < 0 || i >= lodor_cheats.count) return MENU_CALLBACK_NOP;
+	lodor_cheats.item[i].enabled = list->items[i].value;
+	Lodor_cheatsApply();
+	Lodor_cheatsSidecarSave();
+	return MENU_CALLBACK_NOP;
+}
+static int LodorCheats_onDetail(MenuList* list, int i) {
+	if (i < 0 || i >= lodor_cheats.count) return MENU_CALLBACK_NOP;
+	char full[LODOR_CHEAT_DESC_MAX];
+	strncpy(full, lodor_cheats.item[i].desc, sizeof(full)-1);
+	full[sizeof(full)-1] = '\0';
+	GFX_wrapText(font.medium, full, screen->w - SCALE1(PADDING*2), 7);
+	return Menu_message(full, (char*[]){ "B","BACK", NULL });
+}
+static MenuList LodorCheats_menu = {
+	.type = MENU_FIXED,
+	.on_confirm = LodorCheats_onDetail,
+	.on_change = LodorCheats_onChange,
+	.items = NULL,
+};
+static int LodorCheats_openMenu(MenuList* list, int i) {
+	if (!lodor_cheats.count) return MENU_CALLBACK_NOP; // entry only exists with cheats; belt and braces
+	MenuItem* items = calloc(lodor_cheats.count + 1, sizeof(MenuItem));
+	if (!items) return MENU_CALLBACK_NOP;
+	for (int j=0; j<lodor_cheats.count; j++) {
+		items[j].name = lodor_cheats.item[j].desc; // borrowed
+		items[j].value = lodor_cheats.item[j].enabled;
+		items[j].values = onoff_labels;
+	}
+	LodorCheats_menu.items = items;
+	LodorCheats_menu.max_width = 0; // fresh items: recompute the cached width
+	Menu_options(&LodorCheats_menu);
+	LodorCheats_menu.items = NULL;
+	free(items);
+	return MENU_CALLBACK_NOP;
+}
+
 static MenuList options_menu = {
 	.type = MENU_LIST,
 	.items = (MenuItem[]) {
 		{"Frontend", "MinUI (" BUILD_DATE " " BUILD_HASH ")",.on_confirm=OptionFrontend_openMenu},
 		{"Emulator",.on_confirm=OptionEmulator_openMenu},
 		{"Controls",.on_confirm=OptionControls_openMenu},
-		{"Shortcuts",.on_confirm=OptionShortcuts_openMenu}, 
+		{"Shortcuts",.on_confirm=OptionShortcuts_openMenu},
 		{"Save Changes",.on_confirm=OptionSaveChanges_openMenu},
-		{NULL},
-		{NULL},
+		{NULL}, // lodor cheats (#150): slot 5, filled by Lodor_cheatsMenuAttach when the game has cheats
 		{NULL},
 	}
 };
 
 static void OptionSaveChanges_updateDesc(void) {
 	options_menu.items[4].desc = getSaveDesc();
+}
+
+// lodor cheats (#150): the Options menu gains its Cheats entry ONLY when a .cht
+// was found for the running game — with no cheat file the menu is identical to
+// before. Called from main() after Core_load (same reason main() patches
+// items[1].desc there: this array is defined after the code that needs it).
+static void Lodor_cheatsMenuAttach(void) {
+	if (!lodor_cheats.count) return;
+	options_menu.items[5] = (MenuItem){ .name = "Cheats", .on_confirm = LodorCheats_openMenu };
 }
 
 #define OPTION_PADDING 8
@@ -4221,6 +4627,94 @@ static char* getAlias(char* path, char* alias) {
 	}
 }
 
+
+// ---- lodor: in-game Flashback (minarch) -------------------------------------
+// Lists this game's save-history timeline from the server, lets the player pick a point, restores it,
+// reloads it into the LIVE core, and soft-resets so the game reboots into the flashed-back save. The
+// current save is preserved first by the engine's lose-proof --restore-save (it pushes/stages the
+// current save before overwriting). Returns 1 if a flashback was APPLIED (caller closes the menu),
+// 0 on cancel/failure. Reuses the same GFX/PAD list-render idiom as the native launcher.
+#define LODOR_FB_MAX 32
+static void fb_shq(const char* in, char* out, size_t n) { // single-quote-escape for the shell
+	size_t o=0; if(o<n-1)out[o++]='\'';
+	for(const char* p=in;*p&&o<n-5;p++){ if(*p=='\''){out[o++]='\'';out[o++]='\\';out[o++]='\'';out[o++]='\'';} else out[o++]=*p; }
+	if(o<n-1)out[o++]='\''; out[o]='\0';
+}
+static void fb_msg(const char* m) {
+	GFX_clear(screen); GFX_blitMessage(font.large,(char*)m,screen,&(SDL_Rect){0,0,screen->w,screen->h});
+	GFX_blitButtonGroup((char*[]){ "B","BACK", NULL },0,screen,1); GFX_flip(screen);
+	while(1){ GFX_startFrame(); PAD_poll(); if(PAD_justPressed(BTN_B)||PAD_justPressed(BTN_A)) break; SDL_Delay(16); }
+}
+static int Flashback_run(const char* rom_name) {
+	char rrun[MAX_PATH], pathq[MAX_PATH*2], cmd[MAX_PATH*4];
+	snprintf(rrun,sizeof(rrun),"%s/Tools/%s/Lodor.pak/bin/romm-run",SDCARD_PATH,PLATFORM);
+	fb_shq(game.path,pathq,sizeof(pathq));
+
+	GFX_clear(screen); GFX_blitMessage(font.large,"Loading save points...",screen,&(SDL_Rect){0,0,screen->w,screen->h}); GFX_flip(screen);
+	snprintf(cmd,sizeof(cmd),"'%s' --list-saves %s > /tmp/lodor-fb.txt 2>/dev/null",rrun,pathq);
+	system(cmd);
+
+	int ids[LODOR_FB_MAX]; static char labels[LODOR_FB_MAX][96]; int n=0;
+	FILE* f=fopen("/tmp/lodor-fb.txt","r");
+	if(f){ char line[512];
+		while(n<LODOR_FB_MAX && fgets(line,sizeof(line),f)){
+			char* nl=strpbrk(line,"\r\n"); if(nl)*nl='\0'; if(!line[0]) continue;
+			char* id=line; char* date=strchr(line,'\t'); if(!date) continue; *date++='\0';
+			char* dev=strchr(date,'\t'); if(dev)*dev++='\0'; else dev=(char*)"";
+			if(dev[0]){ char* t=strchr(dev,'\t'); if(t)*t='\0'; }
+			ids[n]=atoi(id);
+			snprintf(labels[n],sizeof(labels[n]),"%s  %s",date,dev[0]?dev:"-"); n++;
+		}
+		fclose(f);
+	}
+	if(n==0){ fb_msg("No save points yet.\nPlay and sync first."); return 0; }
+
+	int sel=0, dirty=1, confirm=0;
+	while(1){
+		GFX_startFrame(); PAD_poll();
+		if(confirm){
+			if(PAD_justPressed(BTN_B)){ confirm=0; dirty=1; }
+			else if(PAD_justPressed(BTN_A)){
+				GFX_clear(screen); GFX_blitMessage(font.large,"Flashing back...",screen,&(SDL_Rect){0,0,screen->w,screen->h}); GFX_flip(screen);
+				snprintf(cmd,sizeof(cmd),"'%s' --restore-save %s %d 2>/dev/null",rrun,pathq,ids[sel]);
+				int restored=0; FILE* p=popen(cmd,"r");
+				if(p){ char b[256]; while(fgets(b,sizeof(b),p)){ char* r=strstr(b,"restored="); if(r) restored=atoi(r+9); } pclose(p); }
+				if(restored){ SRAM_read(); core.reset(); return 1; }
+				fb_msg("Couldn't reach RomM.\nWi-Fi may be down - try again."); confirm=0; dirty=1;
+			}
+		} else {
+			if(PAD_justPressed(BTN_UP)){ sel=(sel-1+n)%n; dirty=1; }
+			else if(PAD_justPressed(BTN_DOWN)){ sel=(sel+1)%n; dirty=1; }
+			else if(PAD_justPressed(BTN_B)){ return 0; }
+			else if(PAD_justPressed(BTN_A)){ confirm=1; dirty=1; }
+		}
+		if(dirty){
+			GFX_clear(screen); int ow=GFX_blitHardwareGroup(screen,0);
+			if(confirm){
+				char msg[320]; snprintf(msg,sizeof(msg),"Flash back to:\n%s\n\nThe game restarts there.\nYour current save is kept.",labels[sel]);
+				GFX_blitMessage(font.large,msg,screen,&(SDL_Rect){0,0,screen->w,screen->h});
+				GFX_blitButtonGroup((char*[]){ "B","CANCEL", "A","FLASHBACK", NULL },1,screen,1);
+			} else {
+				char title[160]; snprintf(title,sizeof(title),"Flashback \xe2\x80\x94 %s",rom_name);
+				char tbuf[176]; GFX_truncateText(font.large,title,tbuf,screen->w-SCALE1(PADDING*2)-ow,SCALE1(BUTTON_PADDING*2));
+				SDL_Surface* tt=TTF_RenderUTF8_Blended(font.large,tbuf,COLOR_WHITE);
+				if(tt){ SDL_BlitSurface(tt,NULL,screen,&(SDL_Rect){SCALE1(PADDING+BUTTON_PADDING),SCALE1(PADDING+4)}); SDL_FreeSurface(tt); }
+				for(int i=0;i<n && i<MAIN_ROW_COUNT-1;i++){
+					int row=i+1; SDL_Color color=COLOR_WHITE;
+					char nb[160]; int tw=GFX_truncateText(font.large,labels[i],nb,screen->w-SCALE1(PADDING*2),SCALE1(BUTTON_PADDING*2));
+					int mw=MIN(screen->w-SCALE1(PADDING*2),tw);
+					if(i==sel){ GFX_blitPill(ASSET_WHITE_PILL,screen,&(SDL_Rect){SCALE1(PADDING),SCALE1(PADDING+(row*PILL_SIZE)),mw,SCALE1(PILL_SIZE)}); color=COLOR_BLACK; }
+					SDL_Surface* txt=TTF_RenderUTF8_Blended(font.large,nb,color);
+					if(txt){ SDL_BlitSurface(txt,&(SDL_Rect){0,0,mw-SCALE1(BUTTON_PADDING*2),txt->h},screen,&(SDL_Rect){SCALE1(PADDING+BUTTON_PADDING),SCALE1(PADDING+(row*PILL_SIZE)+4)}); SDL_FreeSurface(txt); }
+				}
+				GFX_blitButtonGroup((char*[]){ "B","BACK", "A","FLASHBACK", NULL },1,screen,1);
+			}
+			GFX_flip(screen); dirty=0;
+		}
+		SDL_Delay(16);
+	}
+}
+
 static void Menu_loop(void) {
 	menu.bitmap = SDL_CreateRGBSurfaceFrom(renderer.src, renderer.true_w, renderer.true_h, FIXED_DEPTH, renderer.src_p, RGBA_MASK_565);
 	// LOG_info("Menu_loop:menu.bitmap %ix%i\n", menu.bitmap->w,menu.bitmap->h);
@@ -4357,6 +4851,11 @@ static void Menu_loop(void) {
 					show_menu = 0;
 				}
 				break;
+				case ITEM_FLASHBACK: {
+					if (Flashback_run(rom_name)) { status = STATUS_RESET; show_menu = 0; }
+					else dirty = 1;
+				}
+				break;
 				case ITEM_OPTS: {
 					if (simple_mode) {
 						core.reset();
@@ -4382,6 +4881,7 @@ static void Menu_loop(void) {
 				}
 				break;
 				case ITEM_QUIT:
+					Lodor_writeAutoShot(); // lodor §gameswitch (#149): quit leaves a fresh capture
 					status = STATUS_QUIT;
 					show_menu = 0;
 					quit = 1; // TODO: tmp?
@@ -4660,6 +5160,7 @@ static void* coreThread(void *arg) {
 			core.run();
 			limitFF();
 			trackFPS();
+			CHEEVOS_do_frame();
 		}
 	}
 	pthread_exit(NULL);
@@ -4679,7 +5180,7 @@ int main(int argc , char* argv[]) {
 	
 	strcpy(core_path, argv[1]);
 	strcpy(rom_path, argv[2]);
-	getEmuName(rom_path, tag_name);
+	Lodor_tagName(rom_path, tag_name, sizeof(tag_name)); // §override (#153): saves dir keys by folder tag, env-first
 	
 	LOG_info("rom_path: %s\n", rom_path);
 
@@ -4719,6 +5220,7 @@ int main(int argc , char* argv[]) {
 	options_menu.items[1].desc = (char*)core.version;
 	
 	Core_load();
+	Lodor_cheatsMenuAttach(); // lodor cheats (#150): Options gains "Cheats" only when a .cht exists
 	Input_init(NULL);
 	Config_readOptions(); // but others load and report options later (eg. nes)
 	Config_readControls(); // restore controls (after the core has reported its defaults)
@@ -4754,6 +5256,7 @@ int main(int argc , char* argv[]) {
 			core.run();
 			limitFF();
 			trackFPS();
+			CHEEVOS_do_frame();
 		}
 
 		if (thread_video && !quit) {
@@ -4762,6 +5265,7 @@ int main(int argc , char* argv[]) {
 			
 			if (backbuffer) {
 				video_refresh_callback_main(backbuffer->pixels,backbuffer->w,backbuffer->h,backbuffer->pitch);
+				CHEEVOS_render(screen);
 				GFX_flip(screen);
 			}
 			core_rq = (pthread_cond_t)PTHREAD_COND_INITIALIZER;

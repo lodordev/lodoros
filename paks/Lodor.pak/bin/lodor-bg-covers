@@ -1,0 +1,102 @@
+#!/bin/sh
+# lodor-bg-covers — detached background box-art warmer daemon (FIX 3 / #99).
+#
+# Modeled on romm-syncd: a tiny POSIX-sh loop that OWNS the WiFi shell-mutex and the
+# pause/resume loop, while the actual cover work + honest progress live in the engine
+# (`lodor-sync --bg-cover-fetch`). Spawned DETACHED (setsid) by the launcher's
+# "Refresh box art (background)" action so it never blocks the UI and survives the menu
+# closing. The radio is LEFT UP between actors per the 2026-06-25 rearchitecture — we only
+# ever wifi_release (drop the lock), never power it down.
+#
+# Division of labor:
+#   * shell (here): single-instance pidfile, WiFi acquire/release, the pause loop
+#     (yield + release while a game runs), re-run on resume.
+#   * engine (--bg-cover-fetch): the cover fetches, bg-task.status writes, the
+#     game-active early-exit. Exit codes: 0 = pass done, 75 = paused-for-game (re-loop),
+#     other = error/stop.
+#
+# Feature is gated OFF on the 128MB miyoomini by the LAUNCHER (it never spawns us there);
+# this script makes no platform assumptions of its own beyond the shared lib.
+
+set -u
+SDCARD="${SDCARD_PATH:-/mnt/SDCARD}"
+PLAT="${PLATFORM:-miyoomini}"
+PAK="$SDCARD/Tools/$PLAT/Lodor.pak"
+BIN="$PAK/lodor-sync"
+STATUS="$PAK/bg-task.status"
+GAME="/tmp/lodor-game-active"
+PIDFILE="/tmp/lodor-bg-covers.pid"
+LOG="$PAK/bg-covers.log"
+
+. "$PAK/lib/romm-sync-lib.sh" || exit 1
+
+log() { echo "$(date +'%F %T') $1" >> "$LOG"; }
+
+write_status() { # $1=state
+	printf 'state=%s done=0 total=0 label="Covers"\n' "$1" > "$STATUS.tmp" 2>/dev/null \
+		&& mv "$STATUS.tmp" "$STATUS" 2>/dev/null
+}
+
+# Single instance: if a live daemon already runs, this trigger is a no-op.
+if [ -f "$PIDFILE" ]; then
+	_old="$(cat "$PIDFILE" 2>/dev/null)"
+	if [ -n "$_old" ] && kill -0 "$_old" 2>/dev/null; then
+		log "already running (pid $_old); exit"
+		exit 0
+	fi
+fi
+echo "$$" > "$PIDFILE"
+
+# On any exit: drop the WiFi lock (NEVER power the radio down) and clear our pidfile.
+# wifi_release is owner-scoped, so it no-ops unless we currently hold the lock.
+trap 'wifi_release; rm -f "$PIDFILE" 2>/dev/null' EXIT INT TERM HUP QUIT
+
+creds_present || { log "no creds; exit"; exit 0; }
+[ -x "$BIN" ]  || { log "engine binary missing: $BIN"; write_status error; exit 1; }
+
+log "lodor-bg-covers started"
+
+# Bound the daemon's lifetime so a stuck network can't keep it looping forever.
+TRIES=0
+MAX_TRIES=240   # ~ generous upper bound across pause cycles
+
+while [ "$TRIES" -lt "$MAX_TRIES" ]; do
+	TRIES=$((TRIES + 1))
+
+	# Pause while a game is running: yield the radio, advertise paused, back off.
+	if [ -f "$GAME" ]; then
+		write_status paused
+		wifi_release
+		sleep 30
+		continue
+	fi
+
+	# Acquire the radio at LOWEST priority (never preempt a user action). "busy" (rc 2)
+	# means another actor holds it — retry shortly without consuming progress.
+	wifi_acquire bg; acq=$?
+	if [ "$acq" -eq 2 ]; then
+		log "wifi busy (another actor); retry"
+		sleep 20
+		continue
+	fi
+	if [ "$acq" -ne 0 ]; then
+		log "wifi up but no usable link (acq=$acq); stop"
+		write_status error
+		exit 1
+	fi
+
+	set_clock 2>/dev/null || log "clock set failed (continuing)"
+
+	# Hand off the actual cover work + status writes to the engine.
+	"$BIN" --bg-cover-fetch >> "$LOG" 2>&1; rc=$?
+	wifi_release
+
+	case "$rc" in
+		75) log "paused for a game; will resume"; sleep 5; continue ;;  # game appeared mid-pass
+		0)  log "pass complete"; exit 0 ;;
+		*)  log "engine exit rc=$rc; stop"; exit "$rc" ;;
+	esac
+done
+
+log "max tries reached; stop"
+exit 0

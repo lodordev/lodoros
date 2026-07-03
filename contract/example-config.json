@@ -1,0 +1,16 @@
+{
+  "hosts": [
+    {
+      "root_uri": "https://romm.example.com",
+      "token": "EXAMPLE-PAIR-TOKEN-not-a-real-secret",
+      "device_id": "example-device-0001",
+      "device_name": "Mini Flip",
+      "scopes": ["roms.read", "saves.write"]
+    }
+  ],
+  "directory_mappings": {
+    "Nintendo Entertainment System (FC)": {"slug": "nes", "relative_path": "nes"}
+  },
+  "mirror_mode": "separate",
+  "fetch_covers": false
+}

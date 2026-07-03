@@ -206,7 +206,12 @@ static int hasMode(const char *path, const char *mode) {
 
 SDL_Surface* PLAT_initVideo(void) {
 	is_plus = exists("/customer/app/axp_test");
-	is_560p = hasMode(MODES_PATH, "752x560p") && exists(USERDATA_PATH "/enable-560p");
+	// lodor: render native 752x560 on ANY miyoomini-family panel that actually reports that
+	// mode (owner decision, locked 2026-06-27). Gate ONLY on real panel capability — never the model
+	// name, never an opt-in flag — so a 752x560 panel is crisp everywhere (launcher + cores) while
+	// a 640x480-only panel (no such mode listed) is untouched and stays 640x480. Safety property:
+	// we never force a mode the panel does not list.
+	is_560p = hasMode(MODES_PATH, "752x560p");
 	LOG_info("is 560p: %i\n", is_560p);
 	
 	putenv("SDL_HIDE_BATTERY=1"); // using MiniUI's custom SDL

@@ -1,0 +1,9 @@
+LodorOS H700 thin-shim pak -- Dreamcast (rg35xxplus / H700)
+
+WHAT THIS SHIPS: only a launcher script + the LodorOS RomM save-sync wrapper. NO emulator,
+NO libretro core, NO BIOS. It runs the system on the device's OWN stock Anbernic RetroArch
+(/mnt/vendor/deep/retro), i.e. firmware the user already owns. Freely redistributable (MIT).
+
+APPROACH CREDIT: ryanmsartor (github.com/ryanmsartor/RGXX-Custom-MinUI-Paks). The technique of
+shimming the stock vendor RetroArch on H700 devices is his; this is a clean LodorOS reauthoring
+that bundles nothing -- in the same spirit LodorOS credits Grout.

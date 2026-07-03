@@ -1,0 +1,47 @@
+#!/bin/sh
+# romm-tailscale — native-launcher entrypoint for the Tailscale QR onboarding (#QR).
+# Sources romm-sync-lib.sh (paths/$ROMM_PAK_DIR) + tailscale-lib.sh (the bring-up), then
+# exposes the four verbs the launcher (minui.c Lodor_obTailscaleFlow / TS_HOST step) shells:
+#
+#   up            -> start userspace tailscaled + INTERACTIVE `tailscale up` (no auth key),
+#                    scrape the login URL; prints  RESULT ts_url=<https://login.tailscale.com/...>
+#                    (empty value on skip/failure, or when an existing sign-in was reused).
+#   status        -> prints  RESULT ts_state=connected|pending|stopped   (poll target).
+#   mark-tier1 H  -> add socks5_proxy+tier to hosts[0] (H is advisory/logging only; the
+#                    root_uri was already written by `romm-run --set-server`); prints
+#                    RESULT ts_tier1=1|0.
+#   down          -> tear the userspace daemon down; prints  RESULT ts_down=1.
+#
+# Output contract mirrors romm-run: a single `RESULT key=value` line the launcher parses
+# byte-for-byte. NEVER prints a token, device_id, or auth key.
+SDCARD="${SDCARD_PATH:-/mnt/SDCARD}"
+PLAT="${PLATFORM:-miyoomini}"
+PAKDIR="$SDCARD/Tools/$PLAT/Lodor.pak"
+# tailscale-lib.sh keys its paths off ROMM_PAK_DIR — set it before sourcing.
+ROMM_PAK_DIR="$PAKDIR"
+export ROMM_PAK_DIR SDCARD PLAT
+
+. "$PAKDIR/lib/romm-sync-lib.sh" 2>/dev/null
+. "$PAKDIR/lib/tailscale-lib.sh" 2>/dev/null || { echo "RESULT ts_err=1"; exit 2; }
+
+case "$1" in
+	up)
+		url=$(tailscale_up_interactive)
+		echo "RESULT ts_url=$url"
+		;;
+	status)
+		echo "RESULT ts_state=$(tailscale_status)"
+		;;
+	mark-tier1)
+		if tailscale_mark_tier1; then echo "RESULT ts_tier1=1"; else echo "RESULT ts_tier1=0"; fi
+		;;
+	down)
+		tailscale_down
+		echo "RESULT ts_down=1"
+		;;
+	*)
+		echo "RESULT ts_err=1"
+		exit 2
+		;;
+esac
+exit 0

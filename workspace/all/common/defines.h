@@ -31,21 +31,39 @@
 #define RESUME_SLOT_PATH "/tmp/resume_slot.txt"
 #define NOUI_PATH "/tmp/noui"
 
-#define TRIAD_WHITE 		0xff,0xff,0xff
-#define TRIAD_BLACK 		0x00,0x00,0x00
-#define TRIAD_LIGHT_GRAY 	0x7f,0x7f,0x7f
-#define TRIAD_GRAY 			0x99,0x99,0x99
-#define TRIAD_DARK_GRAY 	0x26,0x26,0x26
+#define TRIAD_WHITE 		0xf4,0xed,0xe0 // lodor cream foreground (was 0xffffff)
+#define TRIAD_ACCENT 		0xc8,0x40,0x3a // lodor red accent
+#define TRIAD_BLACK 		0x14,0x12,0x10 // lodor
+#define TRIAD_LIGHT_GRAY 	0x8a,0x84,0x78 // lodor
+#define TRIAD_GRAY 			0x6e,0x69,0x60 // lodor
+#define TRIAD_DARK_GRAY 	0x1a,0x18,0x13 // lodor
 
-#define TRIAD_LIGHT_TEXT 	0xcc,0xcc,0xcc
-#define TRIAD_DARK_TEXT 	0x66,0x66,0x66
+#define TRIAD_LIGHT_TEXT 	0xf4,0xed,0xe0 // lodor
+#define TRIAD_DARK_TEXT 	0x1a,0x18,0x13 // lodor
 
-#define COLOR_WHITE			(SDL_Color){TRIAD_WHITE}
-#define COLOR_GRAY			(SDL_Color){TRIAD_GRAY}
-#define COLOR_BLACK			(SDL_Color){TRIAD_BLACK}
-#define COLOR_LIGHT_TEXT	(SDL_Color){TRIAD_LIGHT_TEXT}
-#define COLOR_DARK_TEXT		(SDL_Color){TRIAD_DARK_TEXT}
-#define COLOR_BUTTON_TEXT	(SDL_Color){TRIAD_GRAY}
+// ---- Lodor runtime theme (NextUI-style user color theming) ------------------
+// The TRIAD_* triplets above are the COMPILE-TIME DEFAULTS (warm-black / cream /
+// red). At startup api.c's THEME_load() reads "/.system/res/theme.conf" and, for
+// any key present, overrides the matching THEME_* byte array below; absent file or
+// absent key keeps the default, so the stock look is byte-identical out of the box.
+// Declared as plain byte arrays (NOT SDL_Color) so defines.h stays includable by
+// non-SDL translation units (keymon) — SDL_Color is only built where COLOR_* is used.
+// theme.conf keys: bg text accent light_gray gray dark_gray dark_text
+extern unsigned char THEME_white[3];      // text / cream foreground  (default TRIAD_WHITE)
+extern unsigned char THEME_accent[3];     // accent / red             (default TRIAD_ACCENT)
+extern unsigned char THEME_black[3];      // bg / warm-black          (default TRIAD_BLACK)
+extern unsigned char THEME_light_gray[3]; //                          (default TRIAD_LIGHT_GRAY)
+extern unsigned char THEME_gray[3];       //                          (default TRIAD_GRAY)
+extern unsigned char THEME_dark_gray[3];  //                          (default TRIAD_DARK_GRAY)
+extern unsigned char THEME_dark_text[3];  // text on light pills      (default TRIAD_DARK_TEXT)
+
+#define COLOR_WHITE			(SDL_Color){THEME_white[0],THEME_white[1],THEME_white[2]}
+#define COLOR_ACCENT		(SDL_Color){THEME_accent[0],THEME_accent[1],THEME_accent[2]}
+#define COLOR_GRAY			(SDL_Color){THEME_gray[0],THEME_gray[1],THEME_gray[2]}
+#define COLOR_BLACK			(SDL_Color){THEME_black[0],THEME_black[1],THEME_black[2]}
+#define COLOR_LIGHT_TEXT	(SDL_Color){THEME_white[0],THEME_white[1],THEME_white[2]}
+#define COLOR_DARK_TEXT		(SDL_Color){THEME_dark_text[0],THEME_dark_text[1],THEME_dark_text[2]}
+#define COLOR_BUTTON_TEXT	(SDL_Color){THEME_gray[0],THEME_gray[1],THEME_gray[2]}
 
 // all before scale
 #define PILL_SIZE 30

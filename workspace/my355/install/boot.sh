@@ -9,6 +9,31 @@ SDCARD_PATH="/mnt/SDCARD"
 UPDATE_PATH="$SDCARD_PATH/MinUI.zip"
 SYSTEM_PATH="$SDCARD_PATH/.system"
 
+# --- LODOR CLOCK RESTORE (task #147): forward-only boot restore from datetime.txt ---
+# RTC-less boards boot at epoch. Restore the last persisted wall time so every early
+# timestamp (logs, saves, playtime) is sane before any network. FORWARD-ONLY: a stored
+# time in the past NEVER moves the clock backward - NTP (set_clock) stays the only
+# authority allowed to correct backward.
+LODOR_DT="$SDCARD_PATH/.userdata/shared/datetime.txt"
+if [ -f "$LODOR_DT" ]; then
+	_lodor_stored="$(head -n1 "$LODOR_DT" 2>/dev/null)"
+	_lodor_now="$(date +'%F %T' 2>/dev/null)"
+	_lodor_s="$(printf '%s' "$_lodor_stored" | tr -cd '0-9')"
+	_lodor_n="$(printf '%s' "$_lodor_now" | tr -cd '0-9')"
+	if [ "${#_lodor_s}" -eq 14 ] && [ "${#_lodor_n}" -eq 14 ] && [ "$_lodor_s" != "$_lodor_n" ]; then
+		# equal-length digit strings: lexicographic order == chronological order
+		if [ "$(printf '%s\n%s\n' "$_lodor_s" "$_lodor_n" | sort | head -n1)" = "$_lodor_n" ]; then
+			if date -s "$_lodor_stored" >/dev/null 2>&1; then
+				# best-effort hwclock write-back where an RTC node exists
+				if command -v hwclock >/dev/null 2>&1 && { [ -e /dev/rtc0 ] || [ -e /dev/rtc ]; }; then
+					hwclock -w >/dev/null 2>&1
+				fi
+			fi
+		fi
+	fi
+fi
+# --- END LODOR CLOCK RESTORE ---
+
 CPU_PATH=/sys/devices/system/cpu/cpufreq/policy0/scaling_governor
 echo performance > "$CPU_PATH"
 

@@ -1,0 +1,14 @@
+{
+  "hosts": [
+    {
+      "root_uri": "https://romm.example.com",
+      "port": 0,
+      "token": "paste-your-romm-client-token-here",
+      "insecure_skip_verify": false,
+      "device_id": "",
+      "device_name": "Mini Flip"
+    }
+  ],
+  "api_timeout": 30,
+  "download_timeout": 3600
+}

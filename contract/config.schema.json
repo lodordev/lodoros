@@ -1,0 +1,47 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://lodor.dev/contract/config.schema.json",
+  "title": "Lodor config.json",
+  "description": "THE single source of truth for the on-device config.json read by BOTH the Go engine (engine/config/config.go) AND every launcher/integration that parses it (lodoros/launcher/minui.c, the integration paks). Any reader on any side MUST conform to this nesting. The C launcher reads connection fields from hosts[0] — NOT from top level. The nested-vs-flat divergence is exactly what gated the LODOR card to onboarding (root_uri/token/device_id live under hosts[0], the launcher checked top-level).",
+  "schema_version": 1,
+  "type": "object",
+  "required": ["hosts"],
+  "properties": {
+    "hosts": {
+      "type": "array", "minItems": 1,
+      "description": "RomM servers. hosts[0] is the active host. Connection identity (root_uri, token, device_id) lives HERE, not at top level.",
+      "items": {
+        "type": "object",
+        "required": ["root_uri", "token", "device_id"],
+        "properties": {
+          "root_uri":           {"type": "string", "description": "https://host[/subpath] (scheme required)"},
+          "port":               {"type": "integer"},
+          "username":           {"type": "string"},
+          "password":           {"type": "string"},
+          "token":              {"type": "string", "description": "client token (pair-grant); SECRET — never logged/committed"},
+          "insecure_skip_verify": {"type": "boolean"},
+          "device_id":          {"type": "string", "description": "this device identity; REQUIRED for the launcher connected-gate to pass"},
+          "device_name":        {"type": "string"},
+          "token_name":         {"type": "string"},
+          "token_expires_at":   {"type": "string"},
+          "scopes":             {"type": "array", "items": {"type": "string"}},
+          "tier":               {"type": "integer", "description": "endpoint preference rank, LOWER wins (#87/#84): 1=Tailscale internal (preferred), 2=public Cloudflare Access (fallback); absent/0 = legacy single endpoint. Engine-only; the launcher ignores it."},
+          "socks5_proxy":       {"type": "string", "description": "tier-1 ONLY: local SOCKS5 proxy host:port (e.g. localhost:1055) the engine dials with REMOTE DNS to reach a *.ts.net MagicDNS RomM host through userspace tailscaled (#84). Engine-only."},
+          "cf_access":          {"type": "object", "description": "tier-2 ONLY: Cloudflare Access service-token pair sent as CF-Access-Client-* headers IN ADDITION to the RomM bearer. client_secret is a SECRET — never logged/committed.", "properties": {"client_id": {"type": "string"}, "client_secret": {"type": "string"}}, "required": ["client_id", "client_secret"]}
+        }
+      }
+    },
+    "directory_mappings": {
+      "type": "object",
+      "description": "platform folder name -> {slug, relative_path}; written by the mirror.",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {"slug": {"type": "string"}, "relative_path": {"type": "string"}}
+      }
+    },
+    "api_timeout":      {"type": ["number","integer"]},
+    "download_timeout": {"type": ["number","integer"]},
+    "mirror_mode":      {"type": "string", "enum": ["own", "separate", "merge"]},
+    "fetch_covers":     {"type": "boolean"}
+  }
+}

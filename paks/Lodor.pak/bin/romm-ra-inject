@@ -1,0 +1,179 @@
+#!/bin/sh
+# romm-ra-inject <emulator> <pak-dir> — inject the stored RetroAchievements (RA)
+# credentials + the RA_ENABLE/RA_HARDCORE settings into a STANDALONE emulator's own
+# config file so achievements light up at launch. Called by the standalone heavy-pak
+# wrappers (ROMM_STANDALONE_PAK_WRAPPER) BEFORE launch.real.sh.
+#
+# WHY this exists: minarch-hosted systems get RA from the engine directly (cheevos.c
+# reads config.json + settings.conf in-process). Standalone emulators (flycast /
+# PPSSPP) own their own RA client and read creds from THEIR config files, so the
+# launcher has to write those creds in before the emulator starts. This is the
+# standalone analogue of cheevos.c's credential read.
+#
+# Supported emulators (RA built into the upstream emulator):
+#   flycast   -> emu.cfg     [achievements] Enabled/HardcoreMode/Token/UserName
+#   ppsspp    -> ppsspp.ini  [Achievements] AchievementsEnable/ChallengeMode/UserName/Token
+#   retroarch -> retroarch.cfg (flat) cheevos_enable/username/token/hardcore_mode_enable
+# Emulators with NO upstream RA (mupen64plus / yabasanshiro-SS / DraStic) ship NO
+# ra-emu.conf, so the wrapper never calls this for them — there is nothing to inject.
+#
+# HARD RULE (mirrors the save-sync shim): RA wiring is best-effort and NEVER blocks or
+# breaks a launch. Any error here exits 0 and leaves the emulator config untouched.
+#
+# SECURITY: the RA token is read from config.json and written ONLY into the emulator's
+# own config file. It is NEVER echoed to stdout, a log line, or the process list. No
+# RomM host/token/device_id is read or printed.
+
+set -u
+
+EMU="${1:-}"
+PAK_DIR="${2:-}"
+[ -n "$EMU" ] || exit 0
+
+SDCARD="${SDCARD_PATH:-/mnt/SDCARD}"
+PLAT="${PLATFORM:-tg5040}"
+LODORPAK="$SDCARD/Tools/$PLAT/Lodor.pak"
+SETTINGS="$LODORPAK/settings.conf"
+RALOG="$LODORPAK/session.log"
+
+_ralog() { echo "$(date +'%F %T') [ra-inject] $*" >> "$RALOG" 2>/dev/null; }
+
+# --- locate config.json (same candidate order as cheevos.c) ------------------
+CFG=""
+for c in "${LODOR_CONFIG:-}" \
+         "$SDCARD/Tools/$PLAT/Lodor.pak/config.json" \
+         "$SDCARD/Tools/$PLAT/RomM Sync.pak/config.json" \
+         "$SDCARD/Tools/$PLAT/Grout.pak/config.json"; do
+	[ -n "$c" ] && [ -f "$c" ] && { CFG="$c"; break; }
+done
+
+RA_U=""; RA_T=""
+if [ -n "$CFG" ]; then
+	RA_U=$(sed -n 's/.*"ra_username"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$CFG" | head -1)
+	RA_T=$(sed -n 's/.*"ra_token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$CFG" | head -1)
+fi
+
+# --- read the launcher RA toggles (default: ENABLE=1, HARDCORE=0) ------------
+RA_ENABLE=1; RA_HARDCORE=0
+if [ -f "$SETTINGS" ]; then
+	v=$(sed -n 's/^RA_ENABLE=\([0-9]*\).*/\1/p' "$SETTINGS" | head -1);   [ -n "$v" ] && RA_ENABLE="$v"
+	v=$(sed -n 's/^RA_HARDCORE=\([0-9]*\).*/\1/p' "$SETTINGS" | head -1); [ -n "$v" ] && RA_HARDCORE="$v"
+fi
+
+# active = creds present AND the global RA toggle is on. When inactive we still write
+# the emulator's enable=off so a PRIOR login that's since been turned off stops firing.
+ACTIVE=0
+[ "$RA_ENABLE" = "1" ] && [ -n "$RA_U" ] && [ -n "$RA_T" ] && ACTIVE=1
+
+# --- generic INI section key setter: set/replace key in [section], creating ---
+# the section and/or key if absent. Idempotent; preserves every other line.
+_ini_set() { # <file> <section> <key> <value>
+	_f="$1"; _sec="$2"; _key="$3"; _val="$4"
+	[ -f "$_f" ] || { mkdir -p "$(dirname "$_f")" 2>/dev/null; true > "$_f" 2>/dev/null || return 1; }
+	awk -v sec="[$_sec]" -v key="$_key" -v val="$_val" '
+		BEGIN { insec=0; done=0; secseen=0 }
+		/^[ \t]*\[.*\][ \t]*$/ {
+			if (insec && !done) { print key " = " val; done=1 }
+			gsub(/^[ \t]+|[ \t]+$/, "", $0)
+			insec = ($0==sec); if (insec) secseen=1
+			print; next
+		}
+		{
+			if (insec && $0 ~ ("^[ \t]*" key "[ \t]*=")) {
+				if (!done) { print key " = " val; done=1 }
+				next
+			}
+			print; next
+		}
+		END {
+			if (insec && !done) { print key " = " val; done=1 }
+			if (!secseen)       { print sec; print key " = " val }
+		}
+	' "$_f" > "$_f.ra-tmp" 2>/dev/null && mv "$_f.ra-tmp" "$_f" 2>/dev/null
+}
+
+# --- flat key=value setter (RetroArch cfg). val carries its own quotes. -------
+_cfg_set() { # <file> <key> <quoted-value>
+	_f="$1"; _key="$2"; _val="$3"
+	[ -f "$_f" ] || { mkdir -p "$(dirname "$_f")" 2>/dev/null; true > "$_f" 2>/dev/null || return 1; }
+	awk -v key="$_key" -v val="$_val" '
+		BEGIN { done=0 }
+		$0 ~ ("^[ \t]*" key "[ \t]*=") { if (!done) { print key " = " val; done=1 } next }
+		{ print }
+		END { if (!done) print key " = " val }
+	' "$_f" > "$_f.ra-tmp" 2>/dev/null && mv "$_f.ra-tmp" "$_f" 2>/dev/null
+}
+
+# --- per-emulator config path discovery + injection -------------------------
+case "$EMU" in
+flycast)
+	# emu.cfg location varies by upstream pak; try the common candidates, else seed
+	# the first one (flycast merge-loads, so a pre-seeded [achievements] is honored).
+	CONF=""
+	for p in \
+		"$PAK_DIR/.config/flycast/emu.cfg" \
+		"$PAK_DIR/flycast/emu.cfg" \
+		"${USERDATA_PATH:-}/DC-flycast/emu.cfg" \
+		"${HOME:-}/.config/flycast/emu.cfg"; do
+		[ -n "$p" ] && [ -f "$p" ] && { CONF="$p"; break; }
+	done
+	[ -n "$CONF" ] || CONF="$PAK_DIR/.config/flycast/emu.cfg"
+	if [ "$ACTIVE" = "1" ]; then
+		_ini_set "$CONF" achievements Enabled yes
+		[ "$RA_HARDCORE" = "1" ] && _ini_set "$CONF" achievements HardcoreMode yes \
+		                         || _ini_set "$CONF" achievements HardcoreMode no
+		_ini_set "$CONF" achievements UserName "$RA_U"
+		_ini_set "$CONF" achievements Token "$RA_T"
+		_ralog "flycast RA on (hardcore=$RA_HARDCORE) cfg=$CONF"
+	else
+		_ini_set "$CONF" achievements Enabled no
+		_ralog "flycast RA off (active=$ACTIVE enable=$RA_ENABLE) cfg=$CONF"
+	fi
+	;;
+ppsspp)
+	# Confirmed path: the ben16w minui-psp pak ships ppsspp.ini here (pak.json
+	# update_ignore lists exactly this relative path).
+	CONF=""
+	for p in \
+		"$PAK_DIR/PPSSPPSDL/.config/ppsspp/PSP/SYSTEM/ppsspp.ini" \
+		"$PAK_DIR/.config/ppsspp/PSP/SYSTEM/ppsspp.ini" \
+		"${HOME:-}/.config/ppsspp/PSP/SYSTEM/ppsspp.ini"; do
+		[ -n "$p" ] && [ -f "$p" ] && { CONF="$p"; break; }
+	done
+	[ -n "$CONF" ] || CONF="$PAK_DIR/PPSSPPSDL/.config/ppsspp/PSP/SYSTEM/ppsspp.ini"
+	if [ "$ACTIVE" = "1" ]; then
+		_ini_set "$CONF" Achievements AchievementsEnable True
+		[ "$RA_HARDCORE" = "1" ] && _ini_set "$CONF" Achievements AchievementsChallengeMode True \
+		                         || _ini_set "$CONF" Achievements AchievementsChallengeMode False
+		_ini_set "$CONF" Achievements AchievementsUserName "$RA_U"
+		_ini_set "$CONF" Achievements AchievementsToken "$RA_T"
+		_ralog "ppsspp RA on (hardcore=$RA_HARDCORE) cfg=$CONF"
+	else
+		_ini_set "$CONF" Achievements AchievementsEnable False
+		_ralog "ppsspp RA off (active=$ACTIVE enable=$RA_ENABLE) cfg=$CONF"
+	fi
+	;;
+retroarch)
+	# Generic RetroArch path: the wrapper passes the retroarch.cfg path as $PAK_DIR
+	# (2nd arg) for this emu. Covers device-stock RA (H700 ryanmsartor) + any RA-core
+	# pak. RetroArch owns the full RA stack incl. the offline unlock queue.
+	CONF="$PAK_DIR"
+	[ -n "$CONF" ] && [ -d "$CONF" ] && CONF="$CONF/retroarch.cfg"
+	if [ "$ACTIVE" = "1" ]; then
+		_cfg_set "$CONF" cheevos_enable '"true"'
+		[ "$RA_HARDCORE" = "1" ] && _cfg_set "$CONF" cheevos_hardcore_mode_enable '"true"' \
+		                         || _cfg_set "$CONF" cheevos_hardcore_mode_enable '"false"'
+		_cfg_set "$CONF" cheevos_username "\"$RA_U\""
+		_cfg_set "$CONF" cheevos_token "\"$RA_T\""
+		_ralog "retroarch RA on (hardcore=$RA_HARDCORE) cfg=$CONF"
+	else
+		_cfg_set "$CONF" cheevos_enable '"false"'
+		_ralog "retroarch RA off (active=$ACTIVE enable=$RA_ENABLE) cfg=$CONF"
+	fi
+	;;
+*)
+	_ralog "unknown emulator '$EMU' — no RA injection"
+	;;
+esac
+
+exit 0

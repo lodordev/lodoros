@@ -1,0 +1,38 @@
+#!/bin/sh
+# romm-wifi hold — acquire the WiFi LOCK + set the clock in ONE process, print status (OK/BUSY/ERR),
+# then HOLD the lock until our stdin closes (the caller releases by closing it). Keeping acquire+release
+# in a single pid keeps the /tmp/romm-wifi.lock ownership correct, and the trap makes it kill-safe.
+#
+# LEGACY: this held-helper backed the OLD grout32 download-on-launch flow. The native launcher
+# (minui.c) now owns download-on-launch directly and does NOT use this helper. It is kept only as a
+# still-callable shim. NOTE (2026-06-25): releasing now only DROPS THE LOCK — it does NOT power the
+# radio down (the rearchitecture leaves Wi-Fi up). So "hold" no longer powers Wi-Fi off on exit.
+SDCARD="${SDCARD_PATH:-/mnt/SDCARD}"
+PLAT="${PLATFORM:-miyoomini}"
+WIFI_LOG="$SDCARD/Tools/$PLAT/Lodor.pak/session.log"
+
+. "$SDCARD/Tools/$PLAT/Lodor.pak/lib/romm-sync-lib.sh" 2>/dev/null || { echo "ERR"; exit 1; }
+
+[ "$1" = "hold" ] || { echo "ERR"; exit 1; }
+
+trap 'wifi_release' EXIT INT TERM HUP
+
+export WIFI_PHASES=1   # let the lib emit connect-progress phases (radio/join/address) to our stdout
+
+wifi_acquire fg   # the download-on-launch UI is foreground — it PREEMPTS a background save-push
+case "$?" in
+	0) _phase clock; set_clock >/dev/null 2>&1; echo "OK" ;;
+	2) echo "BUSY"; exit 0 ;;   # another actor holds the radio
+	*) echo "ERR";  exit 0 ;;   # radio came up but no usable link
+esac
+
+# HEARTBEAT: refresh the lock timestamp every 30s while we hold it, so a long transfer (we stamp the
+# lock only once, at acquire) is not reclaimed as "stale" by another actor after _WIFI_STALE seconds.
+# (No warm-marker anymore — there is no reaper to keep warm against; the radio simply stays up.)
+( while :; do sleep 30; [ -d "$_WIFI_LOCK" ] && date +%s > "$_WIFI_LOCK/ts" 2>/dev/null; done ) &
+_HB=$!
+trap 'kill "$_HB" 2>/dev/null; wifi_release' EXIT INT TERM HUP
+
+# Hold until the caller closes our stdin (EOF); then we fall through, kill the heartbeat, drop the lock
+# (the radio is left UP).
+cat >/dev/null 2>&1

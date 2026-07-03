@@ -1,0 +1,5 @@
+rcheevos vendored for LodorOS minarch (task #46)
+Upstream: https://github.com/RetroAchievements/rcheevos
+Version: v12.3.0  commit 2ac45d357bce2906bb0f1438f3eaf8ce6e78e3c4
+License: MIT (see LICENSE)
+Vendored subset: include/ + src/ (rc_client, rapi, rcheevos, rhash, rc_libretro). No test/ or validator/.
