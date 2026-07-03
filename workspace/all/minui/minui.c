@@ -412,6 +412,28 @@ static void Lodor_emuSidecarPath(const char* rom_path, char* out, size_t outsz) 
 	// and the override must survive that — key the sidecar by the canonical basename.
 	snprintf(out, outsz, "%s/.minui/%s/%s.emu.txt", SHARED_USERDATA_PATH, tag, Lodor_stripMarker(slash+1));
 }
+// §override (#144/#163) SECURITY: validate a sidecar pak=/core= VALUE before trusting it.
+// The sidecar is on-card (garble/attacker-influenceable) and its value later rides an eval'd
+// launch command; a bad value must degrade to the default emulator, never smash the stack or
+// inject shell. A legitimate stem is a single filename component: pak names (MGBA, PCSX-ReARMed,
+// gpSP, folder tags with spaces/parens) and core stems. We therefore accept any printable byte
+// EXCEPT the path separator '/' and control chars, cap the length well under the caller buffers,
+// and require at least one non-space character. Deliberately permissive on the printable set so
+// a normal override keeps working — the escaping layer (escapeSingleQuotes) is what neutralizes
+// quotes; this gate just rejects the implausible/dangerous.
+#define LODOR_SIDECAR_MAX 120 // stems are short; well under the 128B pakname / 256B core buffers
+static int Lodor_validStem(const char* v) {
+	if (!v || !v[0]) return 0;
+	size_t len = strlen(v);
+	if (len > LODOR_SIDECAR_MAX) return 0;
+	int printable = 0;
+	for (const unsigned char* p = (const unsigned char*)v; *p; p++) {
+		if (*p < 0x20 || *p == 0x7F) return 0; // control chars (incl. embedded NL/CR/TAB)
+		if (*p == '/') return 0;               // a stem is one component, never a path
+		if (*p != ' ') printable = 1;
+	}
+	return printable;
+}
 // parse the sidecar; either out may be NULL. Returns 1 if the file exists and parsed.
 static int Lodor_readEmuSidecar(const char* rom_path, char* out_pak, size_t paksz, char* out_core, size_t coresz) {
 	if (out_pak) out_pak[0] = '\0';
@@ -425,8 +447,10 @@ static int Lodor_readEmuSidecar(const char* rom_path, char* out_pak, size_t paks
 	while (fgets(line, sizeof(line), f)) {
 		normalizeNewline(line);
 		trimTrailingNewlines(line);
-		if (out_pak  && strncmp(line, "pak=",  4)==0 && line[4])  { strncpy(out_pak,  line+4, paksz-1);  out_pak[paksz-1]='\0'; }
-		if (out_core && strncmp(line, "core=", 5)==0 && line[5])  { strncpy(out_core, line+5, coresz-1); out_core[coresz-1]='\0'; }
+		// §override (#163): only accept a value that passes Lodor_validStem — a rejected value
+		// leaves the out buffer empty, so the resolver falls back to the folder-tag default.
+		if (out_pak  && strncmp(line, "pak=",  4)==0 && Lodor_validStem(line+4))  { strncpy(out_pak,  line+4, paksz-1);  out_pak[paksz-1]='\0'; }
+		if (out_core && strncmp(line, "core=", 5)==0 && Lodor_validStem(line+5))  { strncpy(out_core, line+5, coresz-1); out_core[coresz-1]='\0'; }
 	}
 	fclose(f);
 	return 1;
@@ -437,9 +461,9 @@ static char lodor_core_override[256] = "";
 // try <PAKNAME>.pak under both pak roots (device-specific SDCARD root first, matching
 // getEmuPath's preference order). Returns 1 + fills pak_path when found.
 static int Lodor_findPak(const char* pakname, char* pak_path) { // pak_path: 256
-	sprintf(pak_path, "%s/Emus/%s/%s.pak/launch.sh", SDCARD_PATH, PLATFORM, pakname);
+	snprintf(pak_path, 256, "%s/Emus/%s/%s.pak/launch.sh", SDCARD_PATH, PLATFORM, pakname);
 	if (exists(pak_path)) return 1;
-	sprintf(pak_path, "%s/Emus/%s.pak/launch.sh", PAKS_PATH, pakname);
+	snprintf(pak_path, 256, "%s/Emus/%s.pak/launch.sh", PAKS_PATH, pakname);
 	return exists(pak_path);
 }
 // THE resolver — wraps getEmuPath. Every launch path routes through here so a sidecar
@@ -1251,39 +1275,68 @@ static void queueNext(char* cmd) {
 	quit = 1;
 }
 
-// based on https://stackoverflow.com/a/31775567/145965
-static int replaceString(char *line, const char *search, const char *replace) {
-   char *sp; // start of pattern
-   if ((sp = strstr(line, search)) == NULL) {
-      return 0;
-   }
-   int count = 1;
-   int sLen = strlen(search);
-   int rLen = strlen(replace);
-   if (sLen > rLen) {
-      // move from right to left
-      char *src = sp + sLen;
-      char *dst = sp + rLen;
-      while((*dst = *src) != '\0') { dst++; src++; }
-   } else if (sLen < rLen) {
-      // move from left to right
-      int tLen = strlen(sp) - sLen;
-      char *stop = sp + rLen;
-      char *src = sp + sLen + tLen;
-      char *dst = sp + rLen + tLen;
-      while(dst >= stop) { *dst = *src; dst--; src--; }
-   }
-   memcpy(sp, replace, rLen);
-   count += replaceString(sp + rLen, search, replace);
-   return count;
+// §override (#144/#163) SECURITY: the launch fields (emu_name/emu_path/sd_path/core=) flow
+// from on-card, garble-influenceable data (ROM paths + the .emu.txt sidecar). The legacy
+// in-place '→'\'' expansion (a recursive replaceString) had NO destination bound and smashed the
+// ≤256B stack buffers it escaped through. escapeSingleQuotes now writes into a SEPARATE,
+// capacity-checked output buffer — the source is never mutated and can never overrun. Callers
+// size the destination at 4*strlen(src)+1 (the exact worst case: every byte a quote) and read the
+// returned dst. The old replaceString is gone; nothing else in the launcher used it.
+
+// worst-case escaped size of a ≤255B field (every byte a ' → 4B) plus NUL; the launch fields
+// (emu_name/emu_path/sd_path/core=) are all char[256] sources, so 1024 always suffices.
+#define LODOR_ESC_MAX 1024
+
+// escape src for single-quoted shell context into a caller-owned dst. Every ' becomes '\''.
+// dst must be >= 4*strlen(src)+1. Returns dst, or NULL (and empties dst) when dst is too small
+// — the caller MUST treat NULL as "refuse to launch" rather than run an unescaped command.
+static char* escapeSingleQuotes(char* dst, size_t dstcap, const char* src) {
+	if (!dst || dstcap == 0) return NULL;
+	size_t di = 0;
+	for (const char* s = src; *s; s++) {
+		if (*s == '\'') {
+			if (di + 4 >= dstcap) { dst[0] = '\0'; return NULL; } // need "'\\''" + NUL
+			dst[di++] = '\'';
+			dst[di++] = '\\';
+			dst[di++] = '\'';
+			dst[di++] = '\'';
+		} else {
+			if (di + 1 >= dstcap) { dst[0] = '\0'; return NULL; } // room for byte + NUL
+			dst[di++] = *s;
+		}
+	}
+	dst[di] = '\0';
+	return dst;
 }
-static char* escapeSingleQuotes(char* str) {
-	// why not call replaceString directly?
-	// call points require the modified string be returned
-	// but replaceString is recursive and depends on its
-	// own return value (but does it need to?)
-	replaceString(str, "'", "'\\''");
-	return str;
+
+// §atomic (#161) FAT32-safe whole-file write: write to "<path>.tmp", fflush + fsync the DATA to
+// the card, close, then rename() over the target (atomic on FAT32) and fsync the directory so the
+// rename itself is durable. A mid-write power-yank leaves either the OLD file intact or the fully
+// -written new one — never a zeroed/torn file. Used for the load-bearing card writes (the active
+// profile, the .emu sidecar, settings.conf). Returns 1 on success, 0 on any failure (caller keeps
+// the old file; a failed write never corrupts). On failure the temp is removed.
+static int Lodor_atomicWrite(const char* path, const char* content, size_t len) {
+	char tmp[MAX_PATH];
+	int n = snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+	if (n < 0 || (size_t)n >= sizeof(tmp)) return 0;
+	FILE* f = fopen(tmp, "w");
+	if (!f) return 0;
+	int ok = (fwrite(content, 1, len, f) == len);
+	if (ok) ok = (fflush(f) == 0);
+	if (ok) ok = (fsync(fileno(f)) == 0); // force DATA to the card before the rename
+	if (fclose(f) != 0) ok = 0;
+	if (!ok) { unlink(tmp); return 0; }
+	if (rename(tmp, path) != 0) { unlink(tmp); return 0; } // atomic swap over the live file
+	// fsync the containing directory so the rename (the metadata) is itself durable
+	char dir[MAX_PATH];
+	strncpy(dir, path, sizeof(dir)-1); dir[sizeof(dir)-1] = '\0';
+	char* slash = strrchr(dir, '/');
+	if (slash) {
+		*slash = '\0';
+		int dfd = open(dir[0] ? dir : "/", O_RDONLY | O_DIRECTORY);
+		if (dfd >= 0) { fsync(dfd); close(dfd); }
+	}
+	return 1;
 }
 
 ///////////////////////////////////////
@@ -1361,17 +1414,26 @@ static int autoResume(void) {
 	// §override (#144): LODOR_ROM_TAG rides the /tmp/next eval (assignment-prefix) so the
 	// pak's launch.sh keys saves/states by the FOLDER tag even when a variant pak runs;
 	// LODOR_CORE_OVERRIDE (core= sidecar line) swaps the minarch core stem.
+	// §override (#144/#163): escape each field into its own bounded buffer (worst case
+	// 4*255+1) and snprintf with a truncation check — a garbled tag/path/core can no longer
+	// overflow cmd[] or the escape targets, and a would-be-truncated command is refused.
 	char cmd[1024];
+	char emu_q[LODOR_ESC_MAX], path_q[LODOR_ESC_MAX];
+	if (!escapeSingleQuotes(emu_q, sizeof(emu_q), emu_name) ||
+	    !escapeSingleQuotes(path_q, sizeof(path_q), emu_path)) { LOG_error("autoResume: field too long to escape, refusing launch\n"); return 0; }
+	char sd_q[LODOR_ESC_MAX];
+	if (!escapeSingleQuotes(sd_q, sizeof(sd_q), sd_path)) { LOG_error("autoResume: rom path too long to escape, refusing launch\n"); return 0; }
+	int n;
 	if (lodor_core_override[0]) {
-		char core_q[256]; strcpy(core_q, lodor_core_override);
-		sprintf(cmd, "LODOR_ROM_TAG='%s' LODOR_CORE_OVERRIDE='%s' '%s' '%s'",
-			escapeSingleQuotes(emu_name), escapeSingleQuotes(core_q),
-			escapeSingleQuotes(emu_path), escapeSingleQuotes(sd_path));
+		char core_q[LODOR_ESC_MAX];
+		if (!escapeSingleQuotes(core_q, sizeof(core_q), lodor_core_override)) { LOG_error("autoResume: core override too long to escape, refusing launch\n"); return 0; }
+		n = snprintf(cmd, sizeof(cmd), "LODOR_ROM_TAG='%s' LODOR_CORE_OVERRIDE='%s' '%s' '%s'",
+			emu_q, core_q, path_q, sd_q);
 	}
 	else {
-		sprintf(cmd, "LODOR_ROM_TAG='%s' '%s' '%s'",
-			escapeSingleQuotes(emu_name), escapeSingleQuotes(emu_path), escapeSingleQuotes(sd_path));
+		n = snprintf(cmd, sizeof(cmd), "LODOR_ROM_TAG='%s' '%s' '%s'", emu_q, path_q, sd_q);
 	}
+	if (n < 0 || (size_t)n >= sizeof(cmd)) { LOG_error("autoResume: launch command truncated, refusing launch\n"); return 0; }
 	putInt(RESUME_SLOT_PATH, AUTO_RESUME_SLOT);
 	queueNext(cmd);
 	return 1;
@@ -1385,8 +1447,11 @@ static void openPak(char* path) {
 	}
 	saveLast(path);
 	
-	char cmd[256];
-	sprintf(cmd, "'%s/launch.sh'", escapeSingleQuotes(path));
+	char path_q[LODOR_ESC_MAX];
+	if (!escapeSingleQuotes(path_q, sizeof(path_q), path)) { LOG_error("openPak: path too long to escape, refusing launch\n"); return; }
+	char cmd[LODOR_ESC_MAX + 32];
+	int n = snprintf(cmd, sizeof(cmd), "'%s/launch.sh'", path_q);
+	if (n < 0 || (size_t)n >= sizeof(cmd)) { LOG_error("openPak: launch command truncated, refusing launch\n"); return; }
 	queueNext(cmd);
 }
 static void openRom(char* path, char* last) {
@@ -1449,17 +1514,23 @@ static void openRom(char* path, char* last) {
 	// §override (#144): export LODOR_ROM_TAG (always — save-path integrity: Saves/<folder TAG>)
 	// and LODOR_CORE_OVERRIDE (only when the sidecar names a core). /tmp/next is eval'd by the
 	// MinUI.pak loop, so the POSIX assignment-prefix scopes both to this launch only.
+	// §override (#144/#163): bounded escape + truncation-checked snprintf (see autoResume).
 	char cmd[1024];
+	char emu_q[LODOR_ESC_MAX], path_q[LODOR_ESC_MAX], sd_q[LODOR_ESC_MAX];
+	if (!escapeSingleQuotes(emu_q, sizeof(emu_q), emu_name) ||
+	    !escapeSingleQuotes(path_q, sizeof(path_q), emu_path) ||
+	    !escapeSingleQuotes(sd_q, sizeof(sd_q), sd_path)) { LOG_error("openRom: field too long to escape, refusing launch\n"); return; }
+	int n;
 	if (lodor_core_override[0]) {
-		char core_q[256]; strcpy(core_q, lodor_core_override);
-		sprintf(cmd, "LODOR_ROM_TAG='%s' LODOR_CORE_OVERRIDE='%s' '%s' '%s'",
-			escapeSingleQuotes(emu_name), escapeSingleQuotes(core_q),
-			escapeSingleQuotes(emu_path), escapeSingleQuotes(sd_path));
+		char core_q[LODOR_ESC_MAX];
+		if (!escapeSingleQuotes(core_q, sizeof(core_q), lodor_core_override)) { LOG_error("openRom: core override too long to escape, refusing launch\n"); return; }
+		n = snprintf(cmd, sizeof(cmd), "LODOR_ROM_TAG='%s' LODOR_CORE_OVERRIDE='%s' '%s' '%s'",
+			emu_q, core_q, path_q, sd_q);
 	}
 	else {
-		sprintf(cmd, "LODOR_ROM_TAG='%s' '%s' '%s'",
-			escapeSingleQuotes(emu_name), escapeSingleQuotes(emu_path), escapeSingleQuotes(sd_path));
+		n = snprintf(cmd, sizeof(cmd), "LODOR_ROM_TAG='%s' '%s' '%s'", emu_q, path_q, sd_q);
 	}
+	if (n < 0 || (size_t)n >= sizeof(cmd)) { LOG_error("openRom: launch command truncated, refusing launch\n"); return; }
 	queueNext(cmd);
 }
 static void openDirectory(char* path, int auto_launch) {
@@ -3456,12 +3527,16 @@ static void Lodor_writeEmuSidecar(const char* rom_path, const char* pakname) {
 	strcpy(dir, sc);
 	char* slash = strrchr(dir, '/');
 	if (slash) { *slash = '\0'; mkdir(dir, 0755); }
-	FILE* f = fopen(sc, "w");
-	if (f) {
-		fprintf(f, "pak=%s\n", pakname);
-		if (core[0]) fprintf(f, "core=%s\n", core);
-		fclose(f);
+	// §atomic (#161): build the full sidecar body, then temp+fsync+rename (see Lodor_atomicWrite).
+	char body[512];
+	int bn = snprintf(body, sizeof(body), "pak=%s\n", pakname);
+	if (bn < 0 || (size_t)bn >= sizeof(body)) return;
+	if (core[0]) {
+		int cn = snprintf(body + bn, sizeof(body) - bn, "core=%s\n", core);
+		if (cn < 0 || (size_t)cn >= sizeof(body) - bn) return;
+		bn += cn;
 	}
+	Lodor_atomicWrite(sc, body, (size_t)bn);
 }
 // §override (#144): candidate paks for the ROM's folder TAG, by NAMING CONVENTION —
 // <TAG>.pak (the default, always row 0) plus every <TAG>-<VARIANT>.pak found across BOTH
@@ -3969,9 +4044,12 @@ static char Lodor_profileInitial(void) {
 // (the switch took effect); a heavy library rebuild failure does not un-switch the user.
 static int Lodor_writeActiveProfile(SDL_Surface* screen, const char* label) {
 	char ap[MAX_PATH]; Lodor_activeProfilePath(ap, sizeof(ap));
-	FILE* f = fopen(ap, "w");
+	// §atomic (#161) PRIORITY: a torn active-profile.txt drops the user to the default profile
+	// namespace → saves land in the WRONG namespace. Write it atomically (temp+fsync+rename).
+	char buf[MAX_PATH];
+	int bn = snprintf(buf, sizeof(buf), "%s\n", label ? label : "");
 	int wrote = 0;
-	if (f) { fprintf(f, "%s\n", label ? label : ""); fclose(f); wrote = 1; }
+	if (bn > 0 && (size_t)bn < sizeof(buf)) wrote = Lodor_atomicWrite(ap, buf, (size_t)bn);
 	if (!label || !*label) return wrote; // clearing to single-user: file write is enough
 	char cmd[MAX_PATH*2], out[512];
 	snprintf(cmd, sizeof(cmd), "'%s%s' --mirror-catalog", SDCARD_PATH, LODOR_ROMM_BIN);
@@ -4025,11 +4103,13 @@ static void Lodor_writeSettings(int warm, int grace, int quality_dots, int user_
 	int ra_enable   = Lodor_readRAKey("RA_ENABLE", 1);
 	int ra_hardcore = Lodor_readRAKey("RA_HARDCORE", 0);
 	char sp[MAX_PATH]; Lodor_syncSettingsPath(sp, sizeof(sp));
-	FILE* f = fopen(sp, "w");
-	if (!f) return;
-	fprintf(f, "KEEP_WIFI_WARM=%d\nWIFI_WARM_GRACE=%d\nSHOW_QUALITY_DOTS=%d\nSHOW_USER_BADGE=%d\nfetch_covers=%d\nRA_ENABLE=%d\nRA_HARDCORE=%d\n",
+	// §atomic (#161): settings.conf via temp+fsync+rename — a torn write drops persisted toggles.
+	char body[512];
+	int bn = snprintf(body, sizeof(body),
+		"KEEP_WIFI_WARM=%d\nWIFI_WARM_GRACE=%d\nSHOW_QUALITY_DOTS=%d\nSHOW_USER_BADGE=%d\nfetch_covers=%d\nRA_ENABLE=%d\nRA_HARDCORE=%d\n",
 		warm ? 1 : 0, grace, quality_dots ? 1 : 0, user_badge ? 1 : 0, box_art ? 1 : 0, ra_enable, ra_hardcore);
-	fclose(f);
+	if (bn < 0 || (size_t)bn >= sizeof(body)) return;
+	Lodor_atomicWrite(sp, body, (size_t)bn);
 }
 
 // lodor RA: persist the RA toggles while preserving every sibling key (the inverse of the guard
@@ -4038,12 +4118,14 @@ static void Lodor_writeSettings(int warm, int grace, int quality_dots, int user_
 static void Lodor_writeRASettings(int ra_enable, int ra_hardcore) {
 	int warm, grace; Lodor_readWifiWarm(&warm, &grace);
 	char sp[MAX_PATH]; Lodor_syncSettingsPath(sp, sizeof(sp));
-	FILE* f = fopen(sp, "w");
-	if (!f) return;
-	fprintf(f, "KEEP_WIFI_WARM=%d\nWIFI_WARM_GRACE=%d\nSHOW_QUALITY_DOTS=%d\nSHOW_USER_BADGE=%d\nfetch_covers=%d\nRA_ENABLE=%d\nRA_HARDCORE=%d\n",
+	// §atomic (#161): settings.conf via temp+fsync+rename (mirror of Lodor_writeSettings).
+	char body[512];
+	int bn = snprintf(body, sizeof(body),
+		"KEEP_WIFI_WARM=%d\nWIFI_WARM_GRACE=%d\nSHOW_QUALITY_DOTS=%d\nSHOW_USER_BADGE=%d\nfetch_covers=%d\nRA_ENABLE=%d\nRA_HARDCORE=%d\n",
 		warm ? 1 : 0, grace, Lodor_readQualityDots() ? 1 : 0, Lodor_readUserBadge() ? 1 : 0,
 		Lodor_readBoxArt() ? 1 : 0, ra_enable ? 1 : 0, ra_hardcore ? 1 : 0);
-	fclose(f);
+	if (bn < 0 || (size_t)bn >= sizeof(body)) return;
+	Lodor_atomicWrite(sp, body, (size_t)bn);
 }
 
 // lodor: back-compat shim — toggles WiFi-warm while preserving the quality-dots flag.

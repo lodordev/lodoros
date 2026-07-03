@@ -45,7 +45,7 @@ dd if=customer.mod of=/dev/mtdblock6 bs=128K conv=fsync
 
 killall -9 show.elf
 
-} &> ./log.txt
+} > ./log.txt 2>&1
 
 mv "$DIR" "$DIR.disabled"
 reboot

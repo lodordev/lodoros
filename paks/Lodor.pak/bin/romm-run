@@ -119,7 +119,10 @@ fi
 # engine so its ActiveHost overlay, per-profile anchors/pending, and save dir all follow
 # the profile the launcher selected. Empty when single-user (the engine treats "" as default).
 log "running: $BIN $* (cwd=$PAKD, CFW=MinUI)"
-cd "$PAKD" 2>/dev/null || log "WARN: cd $PAKD failed"
+# CWD-FIX (2026-07-03, #166): the engine reads config.json relative to CWD, so running it
+# from the wrong dir on a cd failure silently used the wrong/absent config. Fail fast instead
+# (this is engine-sync setup, NOT a game launch, so exiting here never blocks a launch/save).
+cd "$PAKD" || { log "FATAL: cd $PAKD failed"; exit 2; }
 out="$(CFW=MinUI LODOR_HOST_OS=lodoros MINUI_DEVICE="$PLAT" IS_MIYOO=1 SDCARD_PATH="$SDCARD" PLATFORM="$PLAT" LODOR_PROFILE="${LODOR_PROFILE:-}" SAVES_PATH="${SAVES_PATH:-}" "$BIN" "$@" 2>&1)"
 rc=$?
 printf '%s\n' "$out"

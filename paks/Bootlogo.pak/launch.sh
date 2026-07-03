@@ -37,7 +37,7 @@ rm logo.img
 
 echo "Done."
 
-} &> ./log.txt
+} > ./log.txt 2>&1
 
 # self-destruct
 DIR=$(dirname "$0")

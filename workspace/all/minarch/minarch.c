@@ -3401,7 +3401,7 @@ static struct {
 static void Lodor_writeAutoShot(void) {
 	if (!game.is_open || !menu.minui_dir[0]) return;
 	char path[MAX_PATH];
-	sprintf(path, "%s/%s.auto.bmp", menu.minui_dir, game.name);
+	snprintf(path, sizeof(path), "%s/%s.auto.bmp", menu.minui_dir, game.name); // §166: bounded
 	SDL_Surface* bitmap = menu.bitmap; // menu open: reuse its gameplay snapshot
 	if (!bitmap && renderer.src)       // in-game: wrap the live frame, zero-copy
 		bitmap = SDL_CreateRGBSurfaceFrom(renderer.src, renderer.true_w, renderer.true_h, FIXED_DEPTH, renderer.src_p, RGBA_MASK_565);
@@ -3418,10 +3418,10 @@ void Menu_init(void) {
 	
 	char emu_name[256];
 	Lodor_tagName(game.path, emu_name, sizeof(emu_name)); // §override (#153): #149 captures + slots key by folder tag, env-first
-	sprintf(menu.minui_dir, SHARED_USERDATA_PATH "/.minui/%s", emu_name);
+	snprintf(menu.minui_dir, sizeof(menu.minui_dir), SHARED_USERDATA_PATH "/.minui/%s", emu_name); // §166: bounded
 	mkdir(menu.minui_dir, 0755);
 
-	sprintf(menu.slot_path, "%s/%s.txt", menu.minui_dir, game.name);
+	snprintf(menu.slot_path, sizeof(menu.slot_path), "%s/%s.txt", menu.minui_dir, game.name); // §166: bounded
 	
 	if (simple_mode) menu.items[ITEM_OPTS] = "Reset";
 	
@@ -3447,6 +3447,10 @@ void Menu_init(void) {
 				
 				// found a valid disc path
 				if (exists(disc_path)) {
+					// §164: disc_paths[9] is fixed — a 10+ disc m3u would overflow the global
+					// array and corrupt adjacent menu fields. Cap at 9 and stop (a normal
+					// ≤9-disc game is unaffected; only pathological/garbled m3us are truncated).
+					if (menu.total_discs >= 9) { LOG_warn("m3u has >9 discs, ignoring the rest\n"); break; }
 					menu.disc_paths[menu.total_discs] = strdup(disc_path);
 					// matched our current disc
 					if (exactMatch(disc_path, game.path)) {
@@ -4550,8 +4554,11 @@ static void Menu_saveState(void) {
 	
 	SDL_Surface* bitmap = menu.bitmap;
 	if (!bitmap) bitmap = SDL_CreateRGBSurfaceFrom(renderer.src, renderer.true_w, renderer.true_h, FIXED_DEPTH, renderer.src_p, RGBA_MASK_565);
+	// §164: guard the RW open — on a full/RO card SDL_RWFromFile returns NULL and the old
+	// SDL_SaveBMP_RW(bitmap, NULL, 1) NULL-derefs. Skip the preview write on failure (the
+	// state .st itself is written below via State_write — a missing thumbnail never blocks a save).
 	SDL_RWops* out = SDL_RWFromFile(menu.bmp_path, "wb");
-	SDL_SaveBMP_RW(bitmap, out, 1);
+	if (out) SDL_SaveBMP_RW(bitmap, out, 1);
 	
 	// LOG_info("%s %ix%i\n", menu.bmp_path, bitmap->w,bitmap->h);
 	

@@ -160,7 +160,29 @@ if [ -n "$ROM" ]; then
 	# MULTI-USER: scan the SAME (profile-namespaced) tree minarch wrote into. $SAVES_PATH
 	# is exported by the boot script (Saves/$LODOR_PROFILE); fall back to the shared Saves
 	# dir when unset (single-user), so the scan and the emulator write always agree.
-	if find "${SAVES_PATH:-$SDCARD/Saves}" \( -iname "$_rb.*" -o -iname "$_rbne.srm" -o -iname "$_rbne.sav" -o -iname "$_rbne.rtc" \) 2>/dev/null | grep -q .; then
+	# BRACKET-FIX (2026-07-03, #162): No-Intro names carry glob metacharacters ([S] [!] [b]
+	# [h] [T-En]). The old `-iname "$_rb.*"` catch-all fed those brackets to find's fnmatch,
+	# so a bracketed ROM's just-written save was never matched and the push/queue was silently
+	# skipped -> save never reached RomM. Now: (a) enumerate the KNOWN save extensions instead
+	# of the `.*` catch-all, and (b) escape the two glob metachars `[`/`]` in the stem so find
+	# matches the literal name. Both save-naming styles are covered: minarch appends to the full
+	# basename ("Game (USA) [S].gbc.srm"), RetroArch replaces the extension ("Game (USA) [S].srm").
+	# Escape the two glob metachars for find's fnmatch. Order-safe: `]`->placeholder first so
+	# the `[`->`[[]` pass can't re-mangle a just-emitted bracket, then placeholder->`[]]`.
+	_rb_g=$(printf %s "$_rb" | sed -e 's/\]/@LODORRB@/g' -e 's/\[/[[]/g' -e 's/@LODORRB@/[]]/g')
+	_rbne_g=$(printf %s "$_rbne" | sed -e 's/\]/@LODORRB@/g' -e 's/\[/[[]/g' -e 's/@LODORRB@/[]]/g')
+	if find "${SAVES_PATH:-$SDCARD/Saves}" \( \
+		-iname "$_rb_g.srm" -o -iname "$_rb_g.sav" -o -iname "$_rb_g.dsv" \
+		-o -iname "$_rb_g.mcr" -o -iname "$_rb_g.mcd" -o -iname "$_rb_g.brm" \
+		-o -iname "$_rb_g.eep" -o -iname "$_rb_g.sra" -o -iname "$_rb_g.fla" \
+		-o -iname "$_rb_g.mpk" -o -iname "$_rb_g.nv" -o -iname "$_rb_g.rtc" \
+		-o -iname "$_rb_g.state*" \
+		-o -iname "$_rbne_g.srm" -o -iname "$_rbne_g.sav" -o -iname "$_rbne_g.dsv" \
+		-o -iname "$_rbne_g.mcr" -o -iname "$_rbne_g.mcd" -o -iname "$_rbne_g.brm" \
+		-o -iname "$_rbne_g.eep" -o -iname "$_rbne_g.sra" -o -iname "$_rbne_g.fla" \
+		-o -iname "$_rbne_g.mpk" -o -iname "$_rbne_g.nv" -o -iname "$_rbne_g.rtc" \
+		-o -iname "$_rbne_g.state*" \
+	\) 2>/dev/null | grep -q .; then
 		if [ -x "$HELPER" ] && romm_wifi_up; then
 			if command -v timeout >/dev/null 2>&1; then
 				timeout 30 "$HELPER" push "$ROM" >/dev/null 2>&1

@@ -1040,7 +1040,9 @@ run_sync() {
 	  # index-0 hero row. Best-effort — does NOT affect $worst; on an empty/failed fetch we
 	  # KEEP the previous recent.txt (don't clobber a good value with a transient miss).
 	  _recent_out=$("$SYNC_BIN" --recent 2>/dev/null)
-	  [ -n "$_recent_out" ] && printf '%s\n' "$_recent_out" > "$ROMM_PAK_DIR/recent.txt"
+	  # ATOMIC-FIX (2026-07-03, #161): temp+mv so a power-yank mid-write can't zero recent.txt
+	  # on FAT32 (matches the temp+mv pattern used for every other card write in this file).
+	  [ -n "$_recent_out" ] && printf '%s\n' "$_recent_out" > "$ROMM_PAK_DIR/recent.txt.tmp.$$" && mv -f "$ROMM_PAK_DIR/recent.txt.tmp.$$" "$ROMM_PAK_DIR/recent.txt"
 	  exit $worst
 	)
 }
