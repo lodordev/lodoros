@@ -935,6 +935,19 @@ lodor_clock_restore() {
 	fi
 	return 0
 }
+# _clk_try — run one clock-set attempt under a HARD wall-clock bound. ntpd/sntp/wget have no
+# usable built-in timeout and block for MINUTES on a cold/filtered route (link up but NTP:123 and
+# the RomM HTTP host unreachable). romm-run guarded set_clock with a 20s external kill, but the
+# five OTHER callers (launch.sh "Sync Now", romm-syncd, romm-wifi, wifi-toggle, lodor-bg-covers)
+# did NOT — so a cold route could freeze the user-facing Sync Now screen (and burn daemon battery)
+# for minutes. Bound it once, here, for every caller. Uses the `timeout` applet when present; on a
+# firmware without it (the historical miyoomini assumption the minarch shim already documents) it
+# runs the command directly — so the Flip path stays byte-for-byte identical, and romm-run's 20s
+# external kill still stands as belt-and-suspenders.
+_clk_try() {
+	_clk_t=$1; shift
+	if command -v timeout >/dev/null 2>&1; then timeout "$_clk_t" "$@"; else "$@"; fi
+}
 set_clock() {
 	# FAST PATH: the device has no RTC battery, so the clock starts at epoch (1970) after a
 	# power loss and needs ONE network sync per boot. Re-running NTP on EVERY engine call cost
@@ -942,9 +955,9 @@ set_clock() {
 	# year it's been set this session — skip instantly. Only the first call per boot pays NTP.
 	_yr=$(date +%Y 2>/dev/null)
 	if [ -n "$_yr" ] && [ "$_yr" -ge 2024 ] 2>/dev/null; then return 0; fi
-	if command -v ntpd >/dev/null 2>&1 && ntpd -q -n -p 162.159.200.123 >/dev/null 2>&1; then _persist_clock; return 0; fi
-	if command -v sntp >/dev/null 2>&1 && sntp -sS 162.159.200.123 >/dev/null 2>&1; then _persist_clock; return 0; fi
-	d="$(wget -S -q -O /dev/null "http://$ROMM_HOST/" 2>&1 | sed -n 's/^ *Date: //p' | head -1)"
+	if command -v ntpd >/dev/null 2>&1 && _clk_try 15 ntpd -q -n -p 162.159.200.123 >/dev/null 2>&1; then _persist_clock; return 0; fi
+	if command -v sntp >/dev/null 2>&1 && _clk_try 10 sntp -sS 162.159.200.123 >/dev/null 2>&1; then _persist_clock; return 0; fi
+	d="$(_clk_try 10 wget -S -q -O /dev/null "http://$ROMM_HOST/" 2>&1 | sed -n 's/^ *Date: //p' | head -1)"
 	if [ -n "$d" ] && date -s "$d" >/dev/null 2>&1; then _persist_clock; return 0; fi
 	return 1
 }

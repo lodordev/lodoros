@@ -8,6 +8,10 @@ REF=${1:-HEAD}; SHA=$(git rev-parse --short "$REF")
 OUT="$ROOT/release/out/$SHA"; mkdir -p "$OUT"
 GATE="$ROOT/release/gate.sh"
 MAN="$ROOT/release/manifest.json"
+# Static aarch64 tailscaled + tailscale (official build) bundled into the muxapp for tier-1
+# (Tailscale) RomM reachability. NOT committed to git (65MB); copied in at assemble time, the
+# same shape the NextUI assembler uses. Override with TSBIN=<dir with tailscaled+tailscale>.
+TSBIN="${TSBIN:-/mnt/cache/tmp/ts-stage/official-1.94.1}"
 fail(){ echo "RELEASE ABORT: $*" >&2; exit 1; }
 hash(){ sha256sum "$1" | cut -d" " -f1; }
 
@@ -118,7 +122,14 @@ assemble_muos(){
   [ -d "$app" ] || fail "muos assemble: staged tree missing 'Lodor Sync'"
   cp "$OUT/lodor-sync-muos-arm64" "$app/lodor-sync"   || fail "muos assemble: engine copy"
   cp "$OUT/lodor-wizard-arm64"    "$app/lodor-wizard" || fail "muos assemble: wizard copy"
-  chmod 0755 "$app/lodor-sync" "$app/lodor-wizard" "$app/mux_launch.sh" "$app/bin/"* 2>/dev/null || true
+  # Tailscale (tier-1 sign-in): static aarch64 daemon + CLI, bundled from the staged official
+  # build (not committed to git). H700 is arm64. Verify the arch so a wrong-arch stage fails loud.
+  [ -x "$TSBIN/tailscaled" ] && [ -x "$TSBIN/tailscale" ] || fail "muos assemble: tailscale binaries not found in TSBIN=$TSBIN"
+  mkdir -p "$app/bin/tailscale"
+  cp "$TSBIN/tailscaled" "$app/bin/tailscale/tailscaled" || fail "muos assemble: tailscaled copy"
+  cp "$TSBIN/tailscale"  "$app/bin/tailscale/tailscale"  || fail "muos assemble: tailscale copy"
+  file "$app/bin/tailscale/tailscaled" | grep -q "aarch64" || fail "muos assemble: bundled tailscaled is not aarch64"
+  chmod 0755 "$app/lodor-sync" "$app/lodor-wizard" "$app/mux_launch.sh" "$app/bin/"*.sh "$app/bin/romm-"* "$app/bin/tailscale/"* 2>/dev/null || true
   [ -f "$app/certs/ca-certificates.crt" ] || fail "muos assemble: CA bundle missing (TLS would fail on-device)"
   # belt-and-braces device-state strip (the archive is tracked-only, but never trust a tree)
   find "$stage" \( -name config.json -o -name catalog-index.json -o -name mirror-manifest.json \
