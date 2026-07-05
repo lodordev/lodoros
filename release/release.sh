@@ -108,18 +108,18 @@ assemble_onion(){
 }
 if [ "${LODOR_BUILD_ONION:-0}" = 1 ]; then ONION_ZIP=$(assemble_onion); else ONION_ZIP="skipped archived"; echo ">> onion assemble SKIPPED (integration ARCHIVED 2026-07-03; set LODOR_BUILD_ONION=1 to build)" >&2; fi
 
-# ---- muOS release .muxapp: Archive Manager shape ("Lodor Sync/…" at the zip root, the
+# ---- muOS release .muxapp: Archive Manager shape ("Lodor/…" at the zip root, the
 # same internal layout as the validated staging build), gated or nothing. Stages the
 # TRACKED integration tree + the muos-arm64 engine + the arm64 wizard + the public CA
 # bundle, strips any live device state, hard-gates the staged tree, then zips
 # Lodor-muOS-<VER>.muxapp (a .muxapp IS a zip; muOS Archive Manager installs it).
 assemble_muos(){
-  stage="$OUT/.muos-stage"; app="$stage/Lodor Sync"
+  stage="$OUT/.muos-stage"; app="$stage/Lodor"
   rm -rf "$stage"; mkdir -p "$stage"
   # tracked source only: a working tree can carry live config.json/tokens the zip must never
   git -C "$ROOT" archive "$REF" "integrations/muos/App" | tar -x -C "$stage" --strip-components=3 -f - \
     || fail "muos assemble: git archive of integrations/muos/App failed"
-  [ -d "$app" ] || fail "muos assemble: staged tree missing 'Lodor Sync'"
+  [ -d "$app" ] || fail "muos assemble: staged tree missing 'Lodor'"
   cp "$OUT/lodor-sync-muos-arm64" "$app/lodor-sync"   || fail "muos assemble: engine copy"
   cp "$OUT/lodor-wizard-arm64"    "$app/lodor-wizard" || fail "muos assemble: wizard copy"
   # Tailscale (tier-1 sign-in): static aarch64 daemon + CLI, bundled from the staged official
@@ -155,7 +155,9 @@ MUOS_MUXAPP=$(assemble_muos)
 # ---- launchers (LodorOS fork) per platform — FAILS CLOSED until wired into this pipeline ----
 # Until each platform build is driven from HERE (toolchain image + gate vs stock + symbol assert),
 # the release refuses to claim coverage it cannot reproduce. No silent partial "all platforms".
-PLATFORMS="miyoomini my282 rg35xxplus my355"
+# Miyoo-only fleet (pivot 2026-07-05). LODOR_BUILD_NONMIYOO=1 restores the archived set.
+if [ "${LODOR_BUILD_NONMIYOO:-0}" = 1 ]; then PLATFORMS="miyoomini my282 rg35xxplus my355 rgb30"
+else PLATFORMS="miyoomini my282 my355"; fi
 LAUNCHERS=""
 for p in $PLATFORMS; do
   if [ -x "$ROOT/release/build-launcher-$p.sh" ]; then

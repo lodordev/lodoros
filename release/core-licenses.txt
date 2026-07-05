@@ -1,0 +1,42 @@
+LodorOS — Bundled emulator core licenses
+=========================================
+
+LodorOS bundles compiled libretro emulator cores. LodorOS does not modify these
+cores; they are redistributed as built by their upstream projects and the
+libretro community. Each core remains under its own license, listed below.
+
+For every GPL-licensed core, the complete corresponding source code is publicly
+available from the upstream repository linked next to it. If you cannot obtain
+source from the link, open an issue on the LodorOS repository and we will
+provide it.
+
+Core                                License      Source
+----                                -------      ------
+fceumm_libretro.so                  GPL-2.0      https://github.com/libretro/libretro-fceumm
+gambatte_libretro.so                GPL-2.0      https://github.com/libretro/gambatte-libretro
+gpsp_libretro.so                    GPL-2.0      https://github.com/libretro/gpsp
+mednafen_pce_fast_libretro.so       GPL-2.0      https://github.com/libretro/beetle-pce-fast-libretro
+mednafen_supafaust_libretro.so      GPL-2.0      https://github.com/libretro/supafaust
+mednafen_vb_libretro.so             GPL-2.0      https://github.com/libretro/beetle-vb-libretro
+mednafen_wswan_libretro.so          GPL-2.0      https://github.com/libretro/beetle-wswan-libretro
+pcsx_rearmed_libretro.so            GPL-2.0      https://github.com/libretro/pcsx_rearmed
+race_libretro.so                    GPL-2.0      https://github.com/libretro/RACE
+mgba_libretro.so                    MPL-2.0      https://github.com/libretro/mgba
+fake08_libretro.so                  see upstream https://github.com/jtothebell/fake-08
+fbneo_libretro.so                   see upstream (non-commercial) https://github.com/libretro/FBNeo
+handy_libretro.so                   see upstream https://github.com/libretro/libretro-handy
+picodrive_libretro.so               see upstream (non-commercial) https://github.com/libretro/picodrive
+pokemini_libretro.so                see upstream https://github.com/libretro/PokeMini
+snes9x2005_plus_libretro.so         see upstream (non-commercial) https://github.com/libretro/snes9x2005
+
+Cores marked "see upstream" carry their project's own custom license terms —
+consult the LICENSE file in the linked repository before reuse.
+
+The MinUI-derived launcher, the Lodor sync engine, and all LodorOS-original
+work are licensed as described in LICENSE and CREDITS.md.
+
+Standalone emulators (bundled in Emus/ paks on capable devices):
+
+PPSSPP (PSP.pak)                    GPL-2.0      https://github.com/hrydgard/ppsspp
+                                    (full license text ships in the pak: PPSSPP.LICENSE.TXT)
+mupen64plus (N64.pak)               GPL-2.0      https://github.com/mupen64plus/mupen64plus-core

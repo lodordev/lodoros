@@ -51,10 +51,26 @@ for p in magicmini; do
   rm -rf "$STAGE/.system/$p" "$STAGE/Emus/$p" "$STAGE/Tools/$p" "$STAGE/.userdata/$p" 2>/dev/null || true
 done
 
+if [ "${LODOR_BUILD_NONMIYOO:-0}" != 1 ]; then
+  echo ">> strip: non-Miyoo platforms (Miyoo-only fleet, pivot 2026-07-05)"
+  for p in rg35xxplus rgb30 gkdpixel m17 rg35xx tg3040 rg40xxcube; do
+    rm -rf "$STAGE/.system/$p" "$STAGE/Emus/$p" "$STAGE/Tools/$p" "$STAGE/.userdata/$p" 2>/dev/null || true
+  done
+  # top-level installer bootstraps for dropped families (keep miyoo285/miyoo354)
+  for d in gkdpixel magicx rg35xx rg35xxplus trimui; do
+    rm -rf "$STAGE/$d" 2>/dev/null || true
+  done
+  # heavy-pak shims only ever existed for H700 -- gone with the platform
+  find "$STAGE" -path "*emus-h700*" -exec rm -rf {} + 2>/dev/null || true
+fi
+
 echo ">> rewrite RELEASE-NOTES.md"
 if [ -f "$NOTES_SRC" ]; then cp "$NOTES_SRC" "$STAGE/RELEASE-NOTES.md";
 else echo "   (no release/release-notes.md template — leaving as-is)"; fi
 printf '%s\n' "$VER" > "$STAGE/version.txt"
+
+echo ">> ship CORE-LICENSES.txt (bundled core licenses + source pointers)"
+cp "$ROOT/release/core-licenses.txt" "$STAGE/CORE-LICENSES.txt"
 
 echo ">> regenerate SHA256SUMS.txt"
 ( cd "$STAGE" && rm -f SHA256SUMS.txt && \
@@ -70,7 +86,7 @@ sh "$GATE" branding        "$STAGE"
 # this gate was not wired here, so the clobber shipped). Platform list = every launcher-ready platform
 # that survives the strips above; a platform later dropped from the zip must be dropped HERE too (the
 # gate failing loudly on its absence is the intended failure mode).
-sh "$GATE" shim-coverage   "$STAGE" "miyoomini my282 my355 rg35xxplus rgb30"
+sh "$GATE" shim-coverage   "$STAGE" "${LODOR_SHIM_PLATS:-miyoomini my282 my355}"
 # cruft: no *-bak deploy backups / rg40xxcube fossil in the zip (0.9.1 shipped 27 bak binaries
 # + the fossil — deploy backups belong on the CARD, never in a release).
 sh "$GATE" cruft           "$STAGE"

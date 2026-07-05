@@ -371,6 +371,56 @@ _bridge_capture() {
 	return 0
 }
 
+# ════════════════════════════════════════════════════════════════════════════════════════════
+# BIOS launch-gate (build #158): an HONEST "needs BIOS" message instead of a silent black screen.
+# ════════════════════════════════════════════════════════════════════════════════════════════
+# A heavy pak fronts an emulator (flycast/…) that CANNOT boot without firmware the user must supply
+# (BYOB — LodorOS ships no BIOS). Before the real launcher runs, ask the engine whether THIS rom's
+# system requires a BIOS and whether it is present where the emulator will actually read it. On the
+# H700 vendor-RA shim, flycast reads system_directory from the (writable/vendor) RA cfg — a DIFFERENT
+# dir than the card's Bios/<TAG>/ — so we resolve it and hand it to the engine. If a required file is
+# missing, show an HONEST message naming the exact file + the exact fix (Sync > Download BIOS) and exit
+# CLEAN (0). HARD RULE: fail-OPEN — no engine / no rom / unparseable output all fall through and launch
+# exactly as before (the gate is never a NEW way to keep a playable game from running).
+_bios_show() {
+	# best-effort modal; say.elf blocks until the user presses A, then restores the screen.
+	if [ -x "$SDCARD/.system/$PLAT/bin/say.elf" ]; then
+		"$SDCARD/.system/$PLAT/bin/say.elf" "$1" >/dev/null 2>&1
+	elif command -v say.elf >/dev/null 2>&1; then
+		say.elf "$1" >/dev/null 2>&1
+	fi
+}
+_bios_gate() {
+	[ -n "$ROM" ] && [ -x "$SYNC_BIN" ] || return 0
+	# resolve any vendor-RA system_directory (writable copy first, then the vendor seed) so the
+	# check looks in the SAME place the emulator will; the engine also checks its own Bios/<TAG>/.
+	_biosdirs=""
+	for _rc in "/.config/retroarch/retroarch.cfg" "/mnt/vendor/deep/retro/retroarch.cfg"; do
+		[ -f "$_rc" ] || continue
+		_sd=$(sed -n 's/^[[:space:]]*system_directory[[:space:]]*=[[:space:]]*"\{0,1\}\([^"]*\)"\{0,1\}.*/\1/p' "$_rc" 2>/dev/null | head -n1)
+		case "$_sd" in
+			""|":"*|"~"*|"default") ;;
+			*) if [ -n "$_biosdirs" ]; then _biosdirs="$_biosdirs:$_sd"; else _biosdirs="$_sd"; fi ;;
+		esac
+	done
+	_bres=$( cd "$(dirname "$SYNC_BIN")" 2>/dev/null && \
+		SDCARD_PATH="$SDCARD" PLATFORM="$PLAT" BASE_PATH="$SDCARD" CFW=MinUI \
+		LODOR_ROM_TAG="$SYSTAG" LODOR_BIOS_DIRS="$_biosdirs" \
+		"$SYNC_BIN" --check-bios "$ROM" 2>/dev/null )
+	case "$_bres" in
+		*bios_ok=0*) ;;
+		*) return 0 ;;
+	esac
+	_bmiss=$(printf '%s' "$_bres" | sed -n 's/.*missing=\([^ ]*\).*/\1/p' | tr ',' ' ')
+	_bsys=$(printf '%s' "$_bres" | sed -n 's/.*system=//p')
+	[ -n "$_bsys" ] || _bsys="$SYSTAG"
+	_bmsg="$_bsys needs BIOS: ${_bmiss:-firmware}. Get it via Sync > Download BIOS, then relaunch."
+	_wraplog "BIOS GATE: blocked launch — $_bmsg (rom=$ROM biosdirs=$_biosdirs)"
+	_bios_show "$_bmsg"
+	exit 0
+}
+_bios_gate
+
 # ── Pre-game save PULL (newer-server-wins) — opportunistic + hard-capped ──────────────────────
 _wraplog "launch rom=$ROM"
 if [ -x "$HELPER" ] && [ -n "$ROM" ]; then

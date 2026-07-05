@@ -93,6 +93,31 @@ if [ -n "$_LODOR_M3U" ] && _lodor_m3u_incomplete "$_LODOR_M3U"; then
 	# load it directly (pcsx/minarch resolve the playlist). $ROM stays as-is.
 fi
 
+# ── BIOS launch-gate (build #158) ─────────────────────────────────────────────────────────────
+# minarch cores read BIOS from system_directory = Bios/<TAG> (minarch.c). Before handing the rom to
+# minarch, ask the engine whether this system requires a BIOS the user must supply and whether it is
+# present; if missing, show an HONEST message naming the file + the fix (Sync > Download BIOS) and
+# return to the menu (exit 0) instead of the silent black screen a BIOS-less core boots into. HARD
+# RULE: fail-OPEN — any check failure (no engine, no rom, unparseable output) launches exactly as
+# before. Systems with no BIOS need (pcsx_rearmed PS1 HLE, etc.) report bios_ok=1 and never gate.
+_LODOR_SYNC="$SDCARD/Tools/$PLAT/Lodor.pak/lodor-sync"
+if [ -n "$ROM" ] && [ -x "$_LODOR_SYNC" ]; then
+	_bres=$( cd "$SDCARD/Tools/$PLAT/Lodor.pak" 2>/dev/null && \
+		SDCARD_PATH="$SDCARD" PLATFORM="$PLAT" BASE_PATH="$SDCARD" CFW=MinUI \
+		./lodor-sync --check-bios "$ROM" 2>/dev/null )
+	case "$_bres" in
+		*bios_ok=0*)
+			_bmiss=$(printf '%s' "$_bres" | sed -n 's/.*missing=\([^ ]*\).*/\1/p' | tr ',' ' ')
+			_bsys=$(printf '%s' "$_bres" | sed -n 's/.*system=//p')
+			_bmsg="${_bsys:-This game} needs BIOS: ${_bmiss:-firmware}. Get it via Sync > Download BIOS, then relaunch."
+			echo "$(date +'%F %T') [shim] BIOS GATE: blocked launch — $_bmsg" >> "$SDCARD/Tools/$PLAT/Lodor.pak/session.log" 2>/dev/null
+			if [ -x "$SDCARD/.system/$PLAT/bin/say.elf" ]; then "$SDCARD/.system/$PLAT/bin/say.elf" "$_bmsg" >/dev/null 2>&1
+			elif command -v say.elf >/dev/null 2>&1; then say.elf "$_bmsg" >/dev/null 2>&1; fi
+			exit 0
+			;;
+	esac
+fi
+
 # Pre-game save pull — OPPORTUNISTIC. Launching a game must NEVER bring WiFi up: a cold bring-up is a
 # 30-45s delay on EVERY launch and it cold-cycles the 8188fu (the wedge risk). So we pull ONLY when WiFi
 # is ALREADY up — a stub we just downloaded leaves the radio warm, or the user turned WiFi on to sync.

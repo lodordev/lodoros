@@ -98,7 +98,7 @@ cmd_elf(){
 # device toolchain) don't false-fail a partial-but-correct staging tree.
 cmd_wifi_coverage(){
   card=${1:?usage: gate.sh wifi-coverage <card-root> [platforms]}
-  plats=${2:-"miyoomini my282 my355 rg35xxplus zero28 magicmini"}
+  plats=${2:-"miyoomini my282 my355"}
   miss=""
   for p in $plats; do
     [ -x "$card/Tools/$p/Wifi.pak/bin/service-on" ] || miss="$miss $p"
@@ -127,7 +127,7 @@ cmd_no_legacy(){
 # portable tools (grep + magic-byte read) so it runs on the build host without binutils.
 cmd_shim_coverage(){
   card=${1:?usage: gate.sh shim-coverage <card-or-staging-root> [platforms]}
-  plats=${2:-"miyoomini my282 my355 rg35xxplus"}
+  plats=${2:-"miyoomini my282 my355"}
   bad=""
   for p in $plats; do
     shf="$card/.system/$p/bin/minarch.elf"

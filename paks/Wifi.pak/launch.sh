@@ -562,7 +562,7 @@ main() {
         return 1
     fi
 
-    allowed_platforms="miyoomini my282 my355 tg5040 rg35xxplus"
+    allowed_platforms="miyoomini my282 my355"
     if ! echo "$allowed_platforms" | grep -q "$PLATFORM"; then
         show_message "$PLATFORM is not a supported platform" 2
         return 1
