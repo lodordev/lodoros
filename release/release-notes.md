@@ -1,4 +1,4 @@
-# LodorOS 0.9.4.1 (beta)
+# LodorOS 0.9.5 (beta)
 
 Your self-hosted RomM library, on your handheld. LodorOS is a MinUI fork that turns a
 retro handheld into a thin client for your own RomM server — your whole collection appears
@@ -39,7 +39,7 @@ Launcher:
   - Tailscale built in (capable devices): QR sign-in, auto bring-up at boot and before
     every sync — your server never needs to be exposed to the internet.
 
-Hardening (0.9.4.1):
+Hardening:
   - All card writes are atomic (FAT32-safe temp+rename+fsync) — a yanked card or dead
     battery mid-write can no longer corrupt configs or saves.
   - Bounds-safe launch paths; ROMs with brackets in the filename sync correctly.
