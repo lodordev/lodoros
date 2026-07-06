@@ -49,11 +49,15 @@ cd "$BIN_DIR"
 # standalone emulator inherits menu clock. Pin PERFORMANCE (minarch's value on
 # this platform) for the emulator; restore menu clock on every exit path so
 # minui gets back the state it expects.
-CPUFREQ_GOV="${PSP_CPUFREQ_GOV:-/sys/devices/system/cpu/cpufreq/policy0/scaling_governor}"
 CPUFREQ_SET="${PSP_CPUFREQ_SET:-/sys/devices/system/cpu/cpufreq/policy0/scaling_setspeed}"
 CPU_GAME_KHZ=1992000
 CPU_MENU_KHZ=600000
-echo userspace > "$CPUFREQ_GOV" 2>/dev/null
+# Deliberately NO governor write: nothing else in LodorOS ever touches
+# scaling_governor at runtime (minarch writes frequencies only), and the one
+# candidate system-freeze on the Flip coincided with the first code to do so.
+# If the runtime governor is userspace (it is when minui's 600 MHz parking
+# works), the setspeed write below is sufficient; under any other governor it
+# is a harmless silent no-op, exactly minarch's semantics.
 echo "$CPU_GAME_KHZ" > "$CPUFREQ_SET" 2>/dev/null
 trap 'echo "$CPU_MENU_KHZ" > "$CPUFREQ_SET" 2>/dev/null' EXIT TERM INT
 
