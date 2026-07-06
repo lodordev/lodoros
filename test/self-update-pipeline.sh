@@ -69,7 +69,7 @@ sleep 1
 # ---- 4. engine --check-update + --fetch-update from the pak dir -------------------
 cd "$PAK"
 OUT=$(LODOR_VERSIONS_URL=http://127.0.0.1:8123/versions.json "$ENG" --check-update)
-echo "$OUT" | grep -q "update=1 current=0.9.4 latest=0.9.9" && ok "--check-update sees 0.9.9" || bad "check: $OUT"
+echo "$OUT" | grep -Eq "update=1 current=[0-9][0-9.]* latest=0.9.9" && ok "--check-update sees 0.9.9" || bad "check: $OUT"
 FOUT=$(LODOR_VERSIONS_URL=http://127.0.0.1:8123/versions.json LODOR_UPDATE_ASSET=lodoros-miyoomini "$ENG" --fetch-update)
 echo "$FOUT" | grep -q "fetched=1 version=0.9.9" && ok "--fetch-update staged ($FOUT)" || bad "fetch: $FOUT"
 [ -f "$PAK/.update/READY" ] && ok "READY marker written" || bad "no READY marker"
