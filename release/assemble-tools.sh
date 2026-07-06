@@ -119,6 +119,14 @@ for p in $LAUNCHER_READY; do
            "$STAGE/Tools/$p/Wifi.pak/bin/on-boot" "$STAGE/Tools/$p/Wifi.pak/bin/wifi-enabled" 2>/dev/null || true
   note "Wifi.pak <- platform-aware (service-on present)"
 
+  # Update Lodor.pak: the LodorOS bespoke self-update lane (fetch+stage, boot applier).
+  # Store-first lanes (NextUI/muOS) have no card pak; this ships ONLY where the applier does.
+  if [ -d "$SRC/Update Lodor.pak" ]; then
+    rm -rf "$STAGE/Tools/$p/Update Lodor.pak"; cp -a "$SRC/Update Lodor.pak" "$STAGE/Tools/$p/Update Lodor.pak"
+    chmod +x "$STAGE/Tools/$p/Update Lodor.pak/launch.sh" 2>/dev/null || true
+    note "Update Lodor.pak <- self-update lane"
+  fi
+
   # Reset WiFi.pak (8188fu only)
   case " $RESETWIFI_PLATS " in *" $p "*)
     if [ -d "$SRC/Reset WiFi.pak" ]; then

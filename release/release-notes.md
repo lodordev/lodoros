@@ -1,4 +1,4 @@
-# LodorOS 0.9.5 (beta)
+# LodorOS 0.9.6 (beta)
 
 Your self-hosted RomM library, on your handheld. LodorOS is a MinUI fork that turns a
 retro handheld into a thin client for your own RomM server — your whole collection appears
@@ -19,6 +19,30 @@ LodorOS supports **Miyoo devices**:
 the same RomM sync engine as a native muOS app, no custom firmware flash needed.
 **Have a TrimUI Brick / Smart Pro?** Use **Lodor for NextUI** — the same engine as a NextUI pak.
 One project, one sync engine, delivered the way each device family does it best.
+
+## New in 0.9.6
+
+- **Update from the device.** A new "Update Lodor" tool checks for, downloads, and
+  stages LodorOS updates; they apply safely on the next boot. Interrupted updates
+  self-heal. Nothing ever updates without you asking.
+- **Tailscale QR sign-in no longer times out on you.** The sign-in screen now waits as
+  long as you need (with a "keep waiting?" checkpoint every 5 minutes) instead of
+  silently tearing down a pending sign-in at 2 minutes, and failures are logged
+  honestly as cancelled vs timed out.
+- **Flip V2 (my355) Wi-Fi bring-up fixes** — more reliable radio/association handling
+  on first setup and after reboots.
+- **Flip V2 standalone emulators fixed** (N64, and the same treatment for Dreamcast and
+  PSP): they now run at full performance clock instead of the 600 MHz menu clock, and
+  N64 gains proper controls — MENU taps pause, holding MENU exits cleanly with your
+  save pushed, and closing the lid sleeps the game (2 minutes closed = clean auto-exit).
+- **Save sync self-heals device pairing.** A card set up outside the wizard (preseeded
+  or cloned) now registers itself with your RomM server on first sync instead of
+  silently never syncing saves.
+
+Known issues:
+- On Dreamcast and PSP (Flip V2), the MENU button behavior inside the emulator is
+  not yet audited — it may quit the game instead of pausing. N64 is fixed; DC/PSP
+  clock fixes are included but were not yet validated on hardware in this release.
 
 ## Highlights
 
