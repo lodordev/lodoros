@@ -4891,10 +4891,13 @@ static int Lodor_obSubmitServer(SDL_Surface* screen, const char* url, const char
 // Blocking Tailscale QR sign-in sub-flow. Brings up userspace tailscaled + interactive
 // `tailscale up` (NO auth key) via the romm-tailscale shell entrypoint, scrapes the
 // https://login.tailscale.com/... URL it prints, renders that as a QR + the URL text
-// with a "scan to sign in" prompt, then polls `tailscale status` (~2s cadence, ~120s
-// cap; B cancels) until the node reports Connected. Returns 1 on connect (caller then
-// asks for the *.ts.net host), 0 on cancel/timeout/failure (caller stays on the
-// chooser). Owns the screen for its duration, like the blocking Wi-Fi connect step.
+// with a "scan to sign in" prompt, then polls `tailscale status` (~2s cadence; B cancels)
+// until the node reports Connected. Every ~5 min of no sign-in it ASKS whether to keep
+// waiting instead of expiring: the pending login URL stays valid on the still-running
+// daemon, so a phone flow the user is mid-completing (SSO, 2FA, a feeding break) is never
+// silently discarded — the 2026-07-05 Flip field failure was exactly a hard cap tearing
+// down a pending auth. Returns 1 on connect (caller then asks for the *.ts.net host),
+// 0 on cancel/failure (caller stays on the chooser). Owns the screen for its duration.
 // HONEST LIMIT: the actual tailscaled CLI handshake can only be proven on-device — this
 // builds the UI + scrape + poll; the runtime interaction is the on-hardware unknown.
 static int Lodor_obTailscaleFlow(SDL_Surface* screen) {
@@ -4928,10 +4931,22 @@ static int Lodor_obTailscaleFlow(SDL_Surface* screen) {
 			Lodor_inlineAck(screen, "Tailscale already signed in.");
 			return 1;
 		}
+		// Diagnosable failure: the raw `up` output head lands in the launcher log
+		// (.userdata/<plat>/logs/minui.txt) so a field "Couldn't start" is never a dead end.
+		fprintf(stderr, "lodor-ts: no login URL in up output (head: %.200s)\n", out);
+		// The daemon may have started anyway (URL lost between shim and scrape, not
+		// bring-up failure) — tear it down so a half-started tailscaled never lingers
+		// behind an error screen.
+		{
+			char dcmd[MAX_PATH * 2], dout[256];
+			snprintf(dcmd, sizeof(dcmd), "'%s%s' down", SDCARD_PATH, LODOR_TS_BIN);
+			Lodor_runWithProgress(screen, "Tidying up...", dcmd, dout, sizeof(dout));
+		}
 		Lodor_inlineAck(screen,
 			"Couldn't start Tailscale sign-in.\nCheck Wi-Fi, or use Home network / Advanced.\nStill stuck? Tools > Tailscale > Reset & forget.");
 		return 0;
 	}
+	fprintf(stderr, "lodor-ts: login URL captured; waiting for the phone sign-in\n");
 
 	Uint32 start = SDL_GetTicks();
 	Uint32 last_poll = 0;
@@ -4942,7 +4957,19 @@ static int Lodor_obTailscaleFlow(SDL_Surface* screen) {
 
 	while (1) {
 		Uint32 now = SDL_GetTicks();
-		if (now - start > 120000) break;                 // ~120s overall cap
+		if (now - start > 300000) {                      // ~5 min: ask, never expire silently
+			// Do NOT tear the daemon down here — the login URL is still pending on it, so
+			// a sign-in the user completes while this prompt is up STILL lands, and "keep
+			// waiting" resumes polling the same URL (a retry would re-scrape the identical
+			// AuthURL from the daemon's status JSON anyway).
+			if (Lodor_inlineConfirm(screen,
+				"Still waiting for the phone sign-in.\n\nKeep waiting?\n(The code on screen stays valid.)")) {
+				start = SDL_GetTicks();
+				last_poll = 0;                           // poll immediately on resume
+				continue;
+			}
+			break;                                       // user gave up: tidy up below
+		}
 
 		PAD_poll();
 		if (PAD_justPressed(BTN_B)) {                    // cancel: tear the daemon down
@@ -4975,7 +5002,7 @@ static int Lodor_obTailscaleFlow(SDL_Surface* screen) {
 		if (qpanel <= 0) y = Lodor_blitCentered(screen, font.large, "(couldn't render the QR - use the link)", y, COLOR_WHITE);
 		y = Lodor_blitCentered(screen, font.small ? font.small : font.large, "Scan with your phone to sign in", y, COLOR_WHITE);
 		y = Lodor_blitCentered(screen, font.small ? font.small : font.large, urlline, y, COLOR_GRAY);
-		y = Lodor_blitCentered(screen, font.small ? font.small : font.large, "If the code won't scan, open login.tailscale.com", y, COLOR_GRAY);
+		y = Lodor_blitCentered(screen, font.small ? font.small : font.large, "Can't scan? Type the link above into your phone's browser", y, COLOR_GRAY);
 		Lodor_blitCentered(screen, font.small ? font.small : font.large, "Waiting for sign-in...", y + SCALE1(4), COLOR_GRAY);
 		GFX_blitButtonGroup((char*[]){ "B", "CANCEL", NULL }, 1, screen, 1);
 		GFX_flip(screen);
@@ -4984,10 +5011,12 @@ static int Lodor_obTailscaleFlow(SDL_Surface* screen) {
 	}
 
 	if (!connected) {
+		// Only reached when the user explicitly declined to keep waiting — say that,
+		// not "timed out" (nothing expired; they chose to stop).
 		char dcmd[MAX_PATH * 2], dout[256];
 		snprintf(dcmd, sizeof(dcmd), "'%s%s' down", SDCARD_PATH, LODOR_TS_BIN);
 		Lodor_runWithProgress(screen, "Tidying up...", dcmd, dout, sizeof(dout));
-		Lodor_inlineAck(screen, "Tailscale sign-in timed out.\nTry again, or use Home network / Advanced.\nStill stuck? Tools > Tailscale > Reset & forget.");
+		Lodor_inlineAck(screen, "Tailscale sign-in cancelled.\nTry again anytime, or use Home network / Advanced.\nStill stuck? Tools > Tailscale > Reset & forget.");
 		return 0;
 	}
 	return 1;
