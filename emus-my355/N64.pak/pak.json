@@ -1,0 +1,7 @@
+{
+  "name": "N64",
+  "type": "EMU",
+  "description": "LodorOS standalone heavy pak (N64) — RomM save-sync wrapped",
+  "platforms": ["my355"],
+  "launch": "launch.sh"
+}
