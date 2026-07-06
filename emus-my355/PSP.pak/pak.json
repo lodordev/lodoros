@@ -1,0 +1,9 @@
+{
+  "name": "PSP",
+  "type": "EMU",
+  "description": "Runs PPSSPP (standalone) for the specified PSP rom",
+  "author": "josegonzalez (pak) / PPSSPP (Henrik Rydgard)",
+  "repo_url": "https://github.com/josegonzalez/minui-ppsspp-pak",
+  "launch": "launch.sh",
+  "platforms": ["my355"]
+}

@@ -1,0 +1,16 @@
+LodorOS tiered heavy-emulator pak — PSP on my355 (arm64)
+Assembled 2026-06-28 by Lodor Devices (build-and-stage; no flash/push/hardware).
+
+Emulator: PPSSPP v1.19.3 (needs SDL2_ttf closure) (GPLv2/upstream; source from its upstream repo).
+SDL2 flavor: kmsdrm (RK3566/Panfrost)  (SDL_VIDEODRIVER=kmsdrm)
+Wrapper: launch.sh (MARKER ROMM_STANDALONE_PAK_WRAPPER) — RomM save-sync pull/push around
+  the standalone emulator via Tools/$PLATFORM/Lodor.pak/bin/romm-session-sync.
+launch.real.sh: runs the standalone PPSSPP v1.19.3 (needs SDL2_ttf closure); closure self-contained under ./my355/.
+BIOS: none (open-source flash0 fonts only)
+Contamination: gate-verified — no RomM token/host/device_id, no console BIOS bundled.
+Closure: BFS readelf, zero non-base MISSING (device GPU driver libEGL/libGLESv2/libgbm/libmali
+  + glibc base intentionally device-supplied).
+
+2026-07-06: launch.real.sh modified from staged copy — added my355 clock contract
+(userspace governor, pin 1992000 kHz for the emulator, restore 600000 kHz on every
+exit path), ported from N64.pak round-2 field fix. NOT yet hardware-tested on PSP.
