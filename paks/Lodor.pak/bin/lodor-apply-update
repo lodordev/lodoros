@@ -1,0 +1,45 @@
+#!/bin/sh
+# lodor-apply-update — boot-time applier for a staged LodorOS self-update.
+#
+# Runs from auto.sh BEFORE romm-syncd starts (install.sh guarantees the ordering), the one
+# moment nothing Lodor-owned is executing — a running binary cannot be replaced on FAT32.
+# The staging ($PAKDIR/.update) was downloaded, sha256-verified, and extracted by the engine's
+# --fetch-update; READY is written LAST, so its presence means "complete verified tree".
+#
+# Failure model: the overlay copy is idempotent, so an interrupted apply (power yank) simply
+# re-runs at the next boot — staging is only removed after install.sh succeeds. No staging =>
+# instant no-op (every normal boot).
+set -u
+SDCARD="${SDCARD_PATH:-/mnt/SDCARD}"
+PLAT="${PLATFORM:-miyoomini}"
+PAKDIR="$SDCARD/Tools/$PLAT/Lodor.pak"
+UPD="$PAKDIR/.update"
+LOG="$PAKDIR/update.log"
+
+[ -f "$UPD/READY" ] || exit 0
+[ -d "$UPD/tree" ] || { rm -rf "$UPD"; exit 0; }   # half-staged (no READY-worthy tree): discard
+
+VER="$(sed -n 's/^version=//p' "$UPD/READY" 2>/dev/null | head -1)"
+echo "$(date '+%F %T') applying staged update${VER:+ ($VER)}" >> "$LOG"
+
+# The LAUNCHER is never touched from this path — minui swaps are the sentinel-guarded A/B
+# flow's job (separate, later). Strip any launcher bytes a mis-built asset might carry.
+rm -rf "$UPD/tree/.system/$PLAT/bin/minui" "$UPD/tree/.system"/*/bin/minui 2>/dev/null
+
+# Belt-and-braces: our daemon must not exec the engine mid-swap (normally not yet started —
+# our auto.sh line precedes its start line; this covers a manual/re-run invocation).
+killall romm-syncd 2>/dev/null
+sleep 1
+
+if cp -r "$UPD/tree/." "$SDCARD/" >> "$LOG" 2>&1; then
+	chmod +x "$SDCARD/.system/$PLAT/bin/lodor-sync" 2>/dev/null
+	# install.sh is idempotent by contract: re-chmods the pak, re-swaps the minarch shim from
+	# the (possibly updated) template, re-asserts the auto.sh lines.
+	sh "$PAKDIR/install.sh" >> "$LOG" 2>&1
+	rm -rf "$UPD"
+	[ -n "$VER" ] && printf '%s\n' "$VER" > "$PAKDIR/.update-applied" 2>/dev/null
+	echo "$(date '+%F %T') update applied${VER:+ -> $VER}" >> "$LOG"
+else
+	echo "$(date '+%F %T') overlay copy FAILED - staging kept, retrying next boot" >> "$LOG"
+fi
+exit 0

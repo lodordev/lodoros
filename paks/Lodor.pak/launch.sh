@@ -23,6 +23,42 @@ status() { log "$1"; say "$1"; }
 [ -x "$WIFI_BIN/service-on" ]   || { say "Wifi.pak not installed"; sleep 2; exit 1; }
 [ -f "$ROMM_PAK_DIR/config.json" ] || { say "RomM not paired"; sleep 2; exit 1; }
 
+# One-time post-update announcement (the boot applier leaves the marker; honest, then gone).
+if [ -f "$PAKDIR/.update-applied" ]; then
+	say "Lodor updated to $(cat "$PAKDIR/.update-applied" 2>/dev/null)"
+	rm -f "$PAKDIR/.update-applied"
+	sleep 3
+fi
+
+# ---- self-update check (bespoke lane: LodorOS has no store) --------------------------------
+# Opportunistic tail of a GOOD sync: the radio is already up, so the manifest GET is nearly
+# free. At most once a day; every failure is silent. Staging/applying is NEVER automatic —
+# that is the explicit "Update Lodor" pak + the boot applier.
+SETTINGS="$PAKDIR/settings.conf"
+get_setting(){ sed -n "s/^$1=//p" "$SETTINGS" 2>/dev/null | head -1; }
+set_setting(){
+	_t="$SETTINGS.tmp.$$"
+	{ [ -f "$SETTINGS" ] && grep -v "^$1=" "$SETTINGS" 2>/dev/null; echo "$1=$2"; } > "$_t" 2>/dev/null \
+		&& mv -f "$_t" "$SETTINGS" 2>/dev/null
+	rm -f "$_t" 2>/dev/null
+}
+maybe_check_update() {
+	_l="$(get_setting update_last_check)"; case "$_l" in ''|*[!0-9]*) _l=0 ;; esac
+	[ $(( $(date +%s) - _l )) -lt 86400 ] && return 0
+	_o="$("$SYNC_BIN" --check-update 2>>"$LOG")" || return 0
+	log "check-update: $_o"
+	set_setting update_last_check "$(date +%s)"
+	_lat="$(printf '%s\n' "$_o" | sed -n 's/.*latest=\([^ ]*\).*/\1/p' | head -1)"
+	case "$_o" in
+		*"update=1"*)
+			set_setting update_available "$_lat"
+			status "Lodor $_lat available - run Update Lodor in Tools"
+			sleep 3 ;;
+		*)  set_setting update_available "" ;;
+	esac
+	return 0
+}
+
 status "RomM: connecting..."
 if ! wifi_acquire; then status "RomM: WiFi unavailable"; sleep 2; exit 1; fi
 
@@ -52,7 +88,8 @@ done
 
 case "$rc" in
 	0) date +%s > /tmp/romm-last-full-sync 2>/dev/null   # full sync: lets session pulls skip
-	   status "RomM: sync complete" ;;
+	   status "RomM: sync complete"
+	   maybe_check_update ;;
 	2) status "RomM: not configured" ;;
 	3) status "RomM: server unreachable" ;;
 	4) status "RomM: finished with errors" ;;

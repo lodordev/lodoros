@@ -21,6 +21,7 @@ cp -a "$MONO/lodoros/workspace" workspace
 echo ">> add LodorOS paks, heavy-shim paks, config/wifi examples"
 cp -a "$MONO/lodoros/paks" paks
 cp -a "$MONO/lodoros/emus-h700" emus-h700
+cp -a "$MONO/lodoros/emus-my355" emus-my355
 cp -a "$MONO/lodoros/config.json.example" config.json.example 2>/dev/null || true
 cp -a "$MONO/lodoros/wifi.txt.example"    wifi.txt.example    2>/dev/null || true
 

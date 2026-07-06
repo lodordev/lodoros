@@ -32,8 +32,8 @@ get_ssid_and_ip() {
 
     for i in $(seq 1 5); do
         if [ "$PLATFORM" = "my355" ]; then
-            ssid="$(wpa_cli -i wlan0 status | grep ssid= | grep -v bssid= | cut -d'=' -f2)"
-            ip_address="$(wpa_cli -i wlan0 status | grep ip_address= | cut -d'=' -f2)"
+            ssid="$(wpa_cli -p /var/run/wpa_supplicant -i wlan0 status | grep ssid= | grep -v bssid= | cut -d'=' -f2)"
+            ip_address="$(wpa_cli -p /var/run/wpa_supplicant -i wlan0 status | grep ip_address= | cut -d'=' -f2)"
         else
             ssid="$(iw dev wlan0 link | grep SSID: | cut -d':' -f2- | sed -e 's/^[ \t]*//' -e 's/[ \t]*$//')"
             ip_address="$(ip addr show wlan0 | grep 'inet ' | awk '{print $2}' | cut -d'/' -f1)"
@@ -111,9 +111,9 @@ networks_screen() {
     DELAY=30
 
     if [ "$PLATFORM" = "my355" ]; then
-        wpa_cli -i wlan0 scan
+        wpa_cli -p /var/run/wpa_supplicant -i wlan0 scan
         for i in $(seq 1 "$DELAY"); do
-            wpa_cli -i wlan0 scan_results | grep -v "ssid" | cut -f 5 | sort -u >>"$minui_list_file"
+            wpa_cli -p /var/run/wpa_supplicant -i wlan0 scan_results | grep -v "ssid" | cut -f 5 | sort -u >>"$minui_list_file"
             if [ -s "$minui_list_file" ]; then
                 break
             fi

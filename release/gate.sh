@@ -15,6 +15,14 @@
 #   gate.sh branding <dir>                   fail on user-visible RomM-named pak/file
 #   gate.sh cruft <dir>                      fail on *-bak backup litter / rg40xxcube fossil (0.9.1 shipped 27)
 #   gate.sh agent-pii <dir>                  fail on internal agent/personal names in shipped text or path names
+#   gate.sh store-version <new> <published>  fail unless <new> strictly exceeds <published> on the
+#                                            NUMERIC components alone — the NextUI Pak Store ignores
+#                                            prerelease suffixes ("0.9.1-beta" compares as 0.9.1), so a
+#                                            suffix-only bump ships a release the store never offers
+#   gate.sh update-manifest <versions.json> [tag]   schema-1 sanity for the self-update manifest:
+#                                            versions parse, every asset has an https URL + 64-hex
+#                                            sha256 + size>0; with [tag], every URL points at that
+#                                            release tag (a manifest must never mix releases)
 # Wire this into release.sh so a failing artifact is never copied to an SD card.
 set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -98,7 +106,7 @@ cmd_elf(){
 # device toolchain) don't false-fail a partial-but-correct staging tree.
 cmd_wifi_coverage(){
   card=${1:?usage: gate.sh wifi-coverage <card-root> [platforms]}
-  plats=${2:-"miyoomini my282 my355"}
+  plats=${2:-"miyoomini my282 my355 rg35xxplus zero28 magicmini"}
   miss=""
   for p in $plats; do
     [ -x "$card/Tools/$p/Wifi.pak/bin/service-on" ] || miss="$miss $p"
@@ -127,7 +135,7 @@ cmd_no_legacy(){
 # portable tools (grep + magic-byte read) so it runs on the build host without binutils.
 cmd_shim_coverage(){
   card=${1:?usage: gate.sh shim-coverage <card-or-staging-root> [platforms]}
-  plats=${2:-"miyoomini my282 my355"}
+  plats=${2:-"miyoomini my282 my355 rg35xxplus"}
   bad=""
   for p in $plats; do
     shf="$card/.system/$p/bin/minarch.elf"
@@ -223,6 +231,55 @@ cmd_agent_pii(){
   ok "agent-pii: no internal/personal names in shipped text or path names under $d"
 }
 
+# store-version: the Pak Store's updater compares versions NUMERICALLY with prerelease suffixes
+# stripped, so "0.9.5-beta.2" after "0.9.5-beta" is invisible to every installed device. Publishing
+# requires a strict numeric increase over the last version pak.json ever named.
+cmd_store_version(){
+  new=${1:?usage: gate.sh store-version <new-version> <last-published-version>}
+  old=${2:?usage: gate.sh store-version <new-version> <last-published-version>}
+  nn=$(printf '%s' "$new" | sed 's/^v//; s/-.*$//'); on=$(printf '%s' "$old" | sed 's/^v//; s/-.*$//')
+  printf '%s' "$nn" | grep -qE '^[0-9]+(\.[0-9]+){0,3}$' || fail "store-version: unparseable new version '$new'"
+  printf '%s' "$on" | grep -qE '^[0-9]+(\.[0-9]+){0,3}$' || fail "store-version: unparseable published version '$old'"
+  [ "$nn" = "$on" ] && fail "store-version: numeric version unchanged ('$new' vs published '$old' both compare as $nn) — the store would never offer this release; bump a numeric component"
+  hi=$(printf '%s\n%s\n' "$nn" "$on" | sort -V | tail -1)
+  [ "$hi" = "$nn" ] || fail "store-version: new '$new' is BELOW published '$old' — installed devices would never see it"
+  ok "store-version: $new supersedes $old under the store's prerelease-blind numeric compare ($nn > $on)"
+}
+
+# update-manifest: the versions.json devices poll and TRUST (sha256 per asset). Anything
+# malformed here bricks the update path quietly (engine treats a bad manifest as unreachable),
+# so publishing gates on shape: schema 1, parseable versions, https URLs, 64-hex hashes,
+# non-zero sizes — and, given the tag, URL-pinning to exactly that release.
+cmd_update_manifest(){
+  mf=${1:?usage: gate.sh update-manifest <versions.json> [tag]}
+  tag=${2:-}
+  [ -f "$mf" ] || fail "update-manifest: no such file: $mf"
+  python3 - "$mf" "$tag" <<'PY' || exit 1
+import json, re, sys
+mf, tag = sys.argv[1], sys.argv[2]
+m = json.load(open(mf))
+assert m.get("schema") == 1, f"schema {m.get('schema')} != 1"
+seen = 0
+for ch in ("stable", "beta"):
+    c = m.get(ch)
+    if c is None:
+        continue
+    v = c.get("version", "")
+    assert re.fullmatch(r"\d+(\.\d+){0,3}(-[0-9A-Za-z.]+)?", v), f"{ch}: bad version {v!r}"
+    for key, a in c.get("assets", {}).items():
+        seen += 1
+        assert a.get("url", "").startswith("https://"), f"{ch}/{key}: non-https url"
+        assert re.fullmatch(r"[0-9a-f]{64}", a.get("sha256", "")), f"{ch}/{key}: bad sha256"
+        assert isinstance(a.get("size"), int) and a["size"] > 0, f"{ch}/{key}: size must be > 0"
+        if tag:
+            assert f"/releases/download/{tag}/" in a["url"], f"{ch}/{key}: url not pinned to {tag}"
+assert seen > 0, "manifest names no assets"
+for k, v in (m.get("notify") or {}).items():
+    assert re.fullmatch(r"\d+(\.\d+){0,3}(-[0-9A-Za-z.]+)?", v), f"notify/{k}: bad version {v!r}"
+print(f"  ok: update-manifest: schema 1, {seen} asset(s) well-formed" + (f", pinned to {tag}" if tag else ""))
+PY
+}
+
 case "${1:-}" in
   contract) cmd_contract;;
   branding) shift; cmd_branding "$@";;
@@ -234,5 +291,7 @@ case "${1:-}" in
   redistributable) shift; cmd_redistributable "$@";;
   cruft) shift; cmd_cruft "$@";;
   agent-pii) shift; cmd_agent_pii "$@";;
-  *) echo "usage: gate.sh {contract|branding <dir>|static-go <bin>|elf <bin> [--max-glibc X.Y] [--symbol SYM]...|wifi-coverage <card-root> [platforms]|no-legacy <dir>|shim-coverage <card-root> [platforms]|redistributable <dir>|cruft <dir>|agent-pii <dir>}"; exit 2;;
+  store-version) shift; cmd_store_version "$@";;
+  update-manifest) shift; cmd_update_manifest "$@";;
+  *) echo "usage: gate.sh {contract|branding <dir>|static-go <bin>|elf <bin> [--max-glibc X.Y] [--symbol SYM]...|wifi-coverage <card-root> [platforms]|no-legacy <dir>|shim-coverage <card-root> [platforms]|redistributable <dir>|cruft <dir>|agent-pii <dir>|store-version <new> <published>}"; exit 2;;
 esac

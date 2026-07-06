@@ -51,4 +51,23 @@ else
 	echo "  [ok] auto.sh starts romm-syncd at boot"
 fi
 
+# 4. boot update-applier via auto.sh — MUST run BEFORE romm-syncd starts (a staged self-update
+# swaps the engine binary; the daemon must not exec it mid-swap). SYNCHRONOUS (no &): a normal
+# boot is an instant no-op (no staging), an applying boot must finish before anything runs.
+# On cards whose auto.sh already carries the syncd line, insert ABOVE it; else append.
+APPLY_LINE='test -x "$SDCARD_PATH/Tools/$PLATFORM/Lodor.pak/bin/lodor-apply-update" && "$SDCARD_PATH/Tools/$PLATFORM/Lodor.pak/bin/lodor-apply-update" # lodor-update-apply'
+if grep -q "# lodor-update-apply" "$AUTO" 2>/dev/null; then
+	echo "  [skip] auto.sh already runs the update applier"
+else
+	if grep -q "# romm-syncd" "$AUTO" 2>/dev/null; then
+		awk -v ins="$APPLY_LINE" '/# romm-syncd/ && !done { print ins; done=1 } { print }' "$AUTO" > "$AUTO.new" \
+			&& mv -f "$AUTO.new" "$AUTO"
+		rm -f "$AUTO.new" 2>/dev/null
+	else
+		printf '%s\n' "$APPLY_LINE" >> "$AUTO"
+	fi
+	chmod +x "$AUTO"
+	echo "  [ok] auto.sh runs the update applier at boot (before the daemon)"
+fi
+
 echo "== done. Reboot to start the daemon. Saves untouched. =="
