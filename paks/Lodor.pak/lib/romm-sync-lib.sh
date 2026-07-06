@@ -97,13 +97,32 @@ clear_say() {
 # script is the right one to run). Degrades safely (just waits + retries DHCP) if wpa_cli's control
 # interface is unavailable. The USB re-enum (wifi-reset) stays a rare LAST resort in wifi_acquire.
 _WPA_CLI="${WPA_CLI:-$(command -v wpa_cli 2>/dev/null || echo /customer/app/wpa_cli)}"
+# my355 (RK3566 / RTL8821CS) ships the STANDARD system wpa_cli, not the Miyoo-vendored
+# /customer/app/wpa_cli (that fallback is miyoomini-only). If wpa_cli was not on PATH when this lib was
+# sourced, the default above wrongly pins to a non-existent /customer/app/wpa_cli, which would make
+# _assoc_complete (now a readiness GATE on this drop-prone radio) always fail. Resolve the real binary
+# from the usual system locations. $PLAT-gated: every other platform keeps the exact resolution above.
+if [ "$PLAT" = my355 ] && [ ! -x "$_WPA_CLI" ]; then
+	for _c in "$(command -v wpa_cli 2>/dev/null)" /usr/sbin/wpa_cli /sbin/wpa_cli /usr/bin/wpa_cli /bin/wpa_cli; do
+		[ -n "$_c" ] && [ -x "$_c" ] && { _WPA_CLI="$_c"; break; }
+	done
+fi
+# my355: the wpa_supplicant.conf we write sets ctrl_interface=/var/run/wpa_supplicant, so the control
+# socket is /var/run/wpa_supplicant/wlan0. Pass -p explicitly so wpa_cli finds it regardless of its
+# compiled-in default (a mismatch is the "no parseable wpa_cli results" symptom). Empty on every other
+# platform, so their wpa_cli invocations stay byte-for-byte unchanged.
+case "$PLAT" in
+	my355) _WPA_CP="-p /var/run/wpa_supplicant" ;;
+	*)     _WPA_CP="" ;;
+esac
 _UDHCPC_SCRIPT="${UDHCPC_SCRIPT:-/etc/init.d/udhcpc.script}"
 _have_up()  { [ "$(cat /sys/class/net/wlan0/operstate 2>/dev/null)" = "up" ]; }
 _have_ip()  { ip addr show wlan0 2>/dev/null | grep -q "inet "; }
 _have_dns() { nslookup "$ROMM_HOST" >/dev/null 2>&1; }
 _assoc_complete() {
 	[ -x "$_WPA_CLI" ] || return 1
-	[ "$("$_WPA_CLI" -i wlan0 status 2>/dev/null | sed -n 's/^wpa_state=//p')" = "COMPLETED" ]
+	# shellcheck disable=SC2086  # $_WPA_CP is a deliberate arg list (empty -> no-op on non-my355)
+	[ "$("$_WPA_CLI" $_WPA_CP -i wlan0 status 2>/dev/null | sed -n 's/^wpa_state=//p')" = "COMPLETED" ]
 }
 # Read the IPv4 address actually assigned to wlan0 (empty if none). Used to print the
 # REAL leased address in the verified "Got IP <addr>" line — never a guess.
@@ -117,7 +136,7 @@ _wlan_ip() {
 _ssid_live() {
 	_s=""
 	if [ -x "$_WPA_CLI" ]; then
-		_s=$("$_WPA_CLI" -i wlan0 status 2>/dev/null | sed -n 's/^ssid=//p' | head -1)
+		_s=$("$_WPA_CLI" $_WPA_CP -i wlan0 status 2>/dev/null | sed -n 's/^ssid=//p' | head -1)
 	fi
 	[ -z "$_s" ] && command -v iwgetid >/dev/null 2>&1 && _s=$(iwgetid -r 2>/dev/null)
 	if [ -z "$_s" ] && command -v iw >/dev/null 2>&1; then
@@ -179,7 +198,9 @@ wait_net() {
 	#    happened to already produce a usable IP-having link (then there's nothing for us to fix).
 	i=0
 	while [ "$i" -lt "$NET_TIMEOUT" ]; do
-		if _have_up && _have_ip; then
+		# _radio_ready (not a bare up+IP) so the my355 stale-IP false-positive cannot bail us to a
+		# premature "connected" here either; identical up+IP truthiness on every other platform.
+		if _radio_ready; then
 			_ip=$(_wlan_ip); [ -n "$_ip" ] && _pset "Got IP $_ip" || _pset "Wi-Fi connected"; return 0
 		fi
 		_assoc_complete && _have_up && break
@@ -525,7 +546,19 @@ _ROMM_SETTINGS="$SDCARD/Tools/$PLAT/Lodor.pak/settings.conf"
 # "radio ready" means a USABLE Wi-Fi LINK: up + a real IPv4 lease. RomM reachability is a SEPARATE,
 # downstream concern (engine --validate) and never gates this — a usable link is a usable link even
 # when the RomM host is momentarily unreachable.
-_radio_ready() { _have_up && _have_ip; }
+# "radio ready" = a USABLE link. On most platforms that is operstate=up + a real IPv4 lease. On the
+# SDIO-drop-prone RK3566 8821cs (my355), the radio associates then DROPS while leaving wlan0 up with a
+# STALE IP -- so up+IP alone is a FALSE positive that short-circuits wifi_acquire past service-on and
+# its my355 drop-recovery. Require ACTUAL association (wpa_state=COMPLETED) there so a wedged-but-up
+# link fails readiness and falls through to a fresh bring-up. $PLAT-gated: miyoomini/my282/rg35xxplus/
+# every other platform keep the exact up+IP predicate (truthiness), byte-for-byte behavior.
+_radio_ready() {
+	_have_up && _have_ip || return 1
+	case "$PLAT" in
+		my355) _assoc_complete ;;
+		*)     return 0 ;;
+	esac
+}
 # True while a LIVE, fresh actor holds the mutex (a stale/dead lock is treated as free).
 _actor_active() {
 	[ -d "$_WIFI_LOCK" ] || return 1
@@ -584,10 +617,15 @@ wifi_acquire() {
 	# association is driven ENTIRELY by /etc/netplan/01-netcfg.yaml. Our cold bring-up went straight
 	# to service-on (netplan apply) against whatever stale/absent config happened to be on disk, so
 	# networkd never associated -> 30s timeout -> the exact "radio didn't start" symptom. Mirror
-	# stock and write the config first. PLATFORM-GATED: miyoomini/my282/my355 keep their working
-	# straight-to-service-on path byte-for-byte untouched (their service-on reads a persistent conf).
+	# stock and write the config first. my355 (RK3566): its service-on runs
+	# `wpa_supplicant -c /userdata/cfg/wpa_supplicant.conf`, but NOTHING generates that file from
+	# wifi.txt on a fresh preseeded card -> wpa_supplicant starts with no network{} block and never
+	# associates. Mirror rg35xxplus: regenerate it from wifi.txt (also pinning
+	# ctrl_interface=/var/run/wpa_supplicant so wpa_cli's socket path is correct) BEFORE service-on.
+	# _wifi_write_config bails without overwriting when wifi.txt is empty. PLATFORM-GATED: miyoomini/
+	# my282 keep their working straight-to-service-on path byte-for-byte untouched (persistent conf).
 	case "$PLAT" in
-		rg35xxplus|rgb30) _wifi_write_config ;;
+		rg35xxplus|rgb30|my355) _wifi_write_config ;;
 	esac
 	_wlog "acquire: bringing Wi-Fi up (service-on)"
 	"$WIFI_BIN/service-on" >>"$WIFI_LOG" 2>&1
@@ -684,14 +722,14 @@ wifi_shutdown() {
 # (which starts wpa_supplicant). Idempotent; a no-op-ish reuse if the link is already up.
 _wifi_radio_warm_for_scan() {
 	# If we already have a responsive wpa_cli ctrl interface, the radio+supplicant are up: reuse.
-	if [ -x "$_WPA_CLI" ] && "$_WPA_CLI" -i wlan0 status >/dev/null 2>&1; then return 0; fi
+	if [ -x "$_WPA_CLI" ] && "$_WPA_CLI" $_WPA_CP -i wlan0 status >/dev/null 2>&1; then return 0; fi
 	# Otherwise bring the stock service up (starts wpa_supplicant + the working udhcpc); this is the
 	# same path the stock Wifi.pak uses, so the ctrl interface comes into existence here.
 	[ -x "$WIFI_BIN/service-on" ] && "$WIFI_BIN/service-on" >>"$WIFI_LOG" 2>&1
 	# Wait briefly for either the interface to come up OR wpa_cli to answer (ctrl iface ready).
 	i=0
 	while [ "$i" -lt 10 ]; do
-		[ -x "$_WPA_CLI" ] && "$_WPA_CLI" -i wlan0 status >/dev/null 2>&1 && return 0
+		[ -x "$_WPA_CLI" ] && "$_WPA_CLI" $_WPA_CP -i wlan0 status >/dev/null 2>&1 && return 0
 		_have_up && break
 		ifconfig wlan0 up >/dev/null 2>&1
 		i=$((i + 1)); sleep 1
@@ -707,11 +745,11 @@ _wpa_scan_results() {
 	[ -x "$_WPA_CLI" ] || { _wlog "wifi_scan: no wpa_cli at $_WPA_CLI"; return 1; }
 	# Kick a scan. wpa_cli prints "OK" / "FAIL-BUSY"; either way results may already be cached, so
 	# we don't hard-fail on a busy scan — we just wait and read what's there.
-	"$_WPA_CLI" -i wlan0 scan >/dev/null 2>&1
+	"$_WPA_CLI" $_WPA_CP -i wlan0 scan >/dev/null 2>&1
 	_n=0
 	while [ "$_n" -lt 12 ]; do
 		sleep 1
-		_res=$("$_WPA_CLI" -i wlan0 scan_results 2>/dev/null)
+		_res=$("$_WPA_CLI" $_WPA_CP -i wlan0 scan_results 2>/dev/null)
 		# A usable result has at least one data row beyond the "bssid ..." header line.
 		if [ -n "$_res" ] && printf '%s\n' "$_res" | grep -q '^[0-9a-fA-F][0-9a-fA-F]:'; then
 			printf '%s\n' "$_res"
@@ -720,7 +758,7 @@ _wpa_scan_results() {
 		_n=$((_n + 1))
 	done
 	# Last read even if it looked empty (caller decides what to do with nothing).
-	"$_WPA_CLI" -i wlan0 scan_results 2>/dev/null
+	"$_WPA_CLI" $_WPA_CP -i wlan0 scan_results 2>/dev/null
 	return 1
 }
 
