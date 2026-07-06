@@ -29,9 +29,13 @@ EVTEST="${M64W_EVTEST:-$(dirname "$0")/my355/evtest}"                # launch.re
 POLL="${M64W_POLL:-0.5}"
 LID_EXIT_SECS="${M64W_LID_EXIT_SECS:-120}"
 MENU_HOLD_SECS="${M64W_MENU_HOLD_SECS:-2}"
+CPU_SET="${M64W_CPU_SET:-}"      # scaling_setspeed path (launch.real.sh passes it)
+CPU_GAME="${M64W_CPU_GAME:-}"    # game clock kHz — restored on lid-open resume
+CPU_MENU="${M64W_CPU_MENU:-}"    # menu clock kHz — pinned while frozen (battery)
 
 alive() { kill -0 "$EMU" 2>/dev/null; }
 bl()    { echo "$1" > "$BLANK" 2>/dev/null; }
+cpu()   { [ -n "$CPU_SET" ] && [ -n "$1" ] && echo "$1" > "$CPU_SET" 2>/dev/null; }
 # Quit is always CONT-then-TERM: a SIGSTOPped emulator cannot handle SIGTERM, and the pak
 # wrapper's save-push trap only runs off a live process's clean exit.
 quit_emu() { kill -CONT "$EMU" 2>/dev/null; kill -TERM "$EMU" 2>/dev/null; }
@@ -46,6 +50,7 @@ EVFIFO=""
 cleanup() {
 	if [ "$frozen" = "1" ]; then
 		bl 0
+		cpu "$CPU_GAME"
 		kill -CONT "$EMU" 2>/dev/null
 		frozen=0
 	fi
@@ -57,32 +62,57 @@ trap 'cleanup; exit 0' TERM INT
 
 # ── MENU long-press watcher (background, via FIFO — both PIDs directly killable) ────────
 # evtest (NOT --grab: the tap must still reach SDL/mupen for pause) prints one line per key
-# event; we track KEY_ESC down->repeat spans. Seconds granularity is fine for a 2s hold.
+# event; we track KEY_ESC down/up and measure the held span ourselves (see below — no
+# kernel autorepeat on this device). Seconds granularity is fine for a 2s hold.
 # A FIFO instead of a pipeline so cleanup can kill evtest BY PID — killing a pipeline's
 # tail orphans its upstream (proven in the off-device rig), and a name-based killall is
 # blind to anything exec'd under another name.
-if [ -x "$EVTEST" ] && [ -e "$EVDEV" ]; then
+# Hold detection needs `read -t` (see below). The device shell is stock firmware we can't
+# test off-hardware — PROBE instead of assume: with support, EOF on /dev/null is silent
+# (rc!=0, empty stderr); without, the shell prints an invalid-option error. Unsupported ->
+# skip the MENU watcher entirely and say so (lid close still freezes and still quits after
+# 120s, so the game is never inescapable), rather than shipping a silently dead gesture.
+_rterr=$( { IFS= read -t 1 -r _rtprobe < /dev/null; } 2>&1 )
+if [ -n "$_rterr" ]; then
+	echo "m64-watch: shell lacks 'read -t' — MENU hold-to-quit disabled (lid exit still works)" >&2
+	EVTEST=""
+fi
+
+if [ -n "$EVTEST" ] && [ -x "$EVTEST" ] && [ -e "$EVDEV" ]; then
 	EVFIFO="/tmp/m64-watch.$$.fifo"
 	rm -f "$EVFIFO"
 	if mkfifo "$EVFIFO" 2>/dev/null; then
 		"$EVTEST" "$EVDEV" > "$EVFIFO" 2>/dev/null &
 		EVT_PID=$!
+		# Hold detection CANNOT rely on kernel autorepeat: this device's gpio-keys emit no
+		# value-2 repeat events (keymon implements its own repeat timing for exactly this
+		# reason — proven on-hardware 2026-07-06 when repeat-based detection never fired).
+		# So: track keydown time and re-check on a 1s read TIMEOUT — a held key is a down
+		# event followed by silence, and the timeout path is what sees the silence.
 		(
 			t0=""
-			while IFS= read -r line; do
-				case "$line" in
-					*"code 1 ("*"), value 1"*) t0=$(date +%s) ;;
-					*"code 1 ("*"), value 0"*) t0="" ;;
-					*"code 1 ("*"), value 2"*)
-						[ -n "$t0" ] || continue
-						if [ $(( $(date +%s) - t0 )) -ge "$MENU_HOLD_SECS" ]; then
-							kill -CONT "$EMU" 2>/dev/null
-							kill -TERM "$EMU" 2>/dev/null
-							break
-						fi ;;
-				esac
-			done < "$EVFIFO"
-		) &
+			while :; do
+				line=""
+				if IFS= read -t 1 -r line; then
+					case "$line" in
+						*"code 1 ("*"), value 1"*) t0=$(date +%s) ;;
+						*"code 1 ("*"), value 0"*) t0="" ;;
+					esac
+				else
+					# timeout (silence while held) or EOF (evtest gone). A dead evtest
+					# makes read fail instantly — the sleep bounds that to a lazy poll,
+					# and the liveness checks below exit the loop.
+					sleep 0.2
+					kill -0 "$EVT_PID" 2>/dev/null || break
+				fi
+				if [ -n "$t0" ] && [ $(( $(date +%s) - t0 )) -ge "$MENU_HOLD_SECS" ]; then
+					kill -CONT "$EMU" 2>/dev/null
+					kill -TERM "$EMU" 2>/dev/null
+					break
+				fi
+				kill -0 "$EMU" 2>/dev/null || break
+			done
+		) < "$EVFIFO" &
 		RD_PID=$!
 	fi
 fi
@@ -97,6 +127,7 @@ while alive; do
 			closed_at=$(date +%s)
 			kill -STOP "$EMU" 2>/dev/null
 			bl 4
+			cpu "$CPU_MENU"
 		elif [ -n "$closed_at" ] && [ $(( $(date +%s) - closed_at )) -ge "$LID_EXIT_SECS" ]; then
 			bl 0
 			quit_emu
@@ -108,6 +139,7 @@ while alive; do
 			frozen=0
 			closed_at=""
 			bl 0
+			cpu "$CPU_GAME"
 			kill -CONT "$EMU" 2>/dev/null
 		fi
 	fi

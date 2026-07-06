@@ -43,6 +43,20 @@ M64P_LDP="$BIN_DIR:$SDCARD/.system/$PLAT/lib:${LD_LIBRARY_PATH:-}"
 M64P_PRELOAD="libEGL.so"
 
 cd "$BIN_DIR"
+# ── Clock contract (2026-07-06 Flip fix, round 2) ────────────────────────────
+# my355 runs a `userspace` cpufreq governor: the FRONTEND pins the clock. minui
+# parks menus at 600 MHz and it is MINARCH that raises it for a game — so a
+# standalone emulator inherited menu clock and N64 ran the whole session at
+# 600 MHz ("very very laggy"). Pin PERFORMANCE (same value as minarch's
+# CPU_SPEED_PERFORMANCE on this platform) for the emulator; restore menu clock
+# on every exit path so minui gets back the state it expects.
+CPUFREQ_GOV="${M64_CPUFREQ_GOV:-/sys/devices/system/cpu/cpufreq/policy0/scaling_governor}"
+CPUFREQ_SET="${M64_CPUFREQ_SET:-/sys/devices/system/cpu/cpufreq/policy0/scaling_setspeed}"
+CPU_GAME_KHZ=1992000
+CPU_MENU_KHZ=600000
+echo userspace > "$CPUFREQ_GOV" 2>/dev/null
+echo "$CPU_GAME_KHZ" > "$CPUFREQ_SET" 2>/dev/null
+
 # ── Input contract (2026-07-06 Flip fix) ─────────────────────────────────────
 # The Flip's MENU key is KEY_ESC on event0 (same code keymon watches). Stock
 # CoreEvents binds Escape=Stop, so MENU instantly quit the game mid-play (it
@@ -70,7 +84,9 @@ env LD_LIBRARY_PATH="$M64P_LDP" LD_PRELOAD="$M64P_PRELOAD" \
 EMU_PID=$!
 WATCH_PID=""
 if [ -x "$WATCH" ] || [ -f "$WATCH" ]; then
-    M64W_EVTEST="$BIN_DIR/evtest" sh "$WATCH" "$EMU_PID" &
+    M64W_EVTEST="$BIN_DIR/evtest" M64W_CPU_SET="$CPUFREQ_SET" \
+    M64W_CPU_GAME="$CPU_GAME_KHZ" M64W_CPU_MENU="$CPU_MENU_KHZ" \
+        sh "$WATCH" "$EMU_PID" &
     WATCH_PID=$!
 fi
 # Power-off / launcher teardown sends TERM here: forward it so the emulator dies
@@ -85,4 +101,5 @@ done
 # TERM (not KILL) so the watcher's trap reaps its evtest/FIFO and can never leave
 # the screen dark or the emulator frozen.
 [ -n "$WATCH_PID" ] && kill -TERM "$WATCH_PID" 2>/dev/null
+echo "$CPU_MENU_KHZ" > "$CPUFREQ_SET" 2>/dev/null   # hand minui back its menu clock
 exit $rc
