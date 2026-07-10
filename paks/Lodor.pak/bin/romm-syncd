@@ -37,6 +37,59 @@ not_in_game() {
 	return 0
 }
 
+# ── SELF-HEAL: the update-applier boot hook (lodoros#18) ─────────────────────────────────
+# Cards built before install.sh grew the "# lodor-update-apply" auto.sh line stage self-updates
+# forever and never apply them: overlays refresh this pak, but nothing re-runs install.sh, so
+# lodor-apply-update is never invoked at boot. THIS daemon is launched by every affected card's
+# existing auto.sh line, so it is the one place guaranteed to run on those cards — heal here.
+# Mirrors install.sh exactly: same APPLY_LINE, same sentinel, same insert-ABOVE-the-syncd-line
+# ordering (apply must finish before the daemon can exec the engine). Atomic temp+mv (FAT32
+# doctrine — a yank mid-write must never leave a truncated auto.sh). Idempotent: the sentinel
+# grep means a healed (or install.sh-built) card is returned untouched, byte-identical.
+AUTO="$SDCARD/.userdata/$PLAT/auto.sh"
+APPLY_LINE='test -x "$SDCARD_PATH/Tools/$PLATFORM/Lodor.pak/bin/lodor-apply-update" && "$SDCARD_PATH/Tools/$PLATFORM/Lodor.pak/bin/lodor-apply-update" # lodor-update-apply'
+SYNCD_LINE='test -x "$SDCARD_PATH/Tools/$PLATFORM/Lodor.pak/bin/romm-syncd" && "$SDCARD_PATH/Tools/$PLATFORM/Lodor.pak/bin/romm-syncd" >/dev/null 2>&1 </dev/null & # romm-syncd'
+# heal_auto_sh: 0 = healed, 1 = already hooked (no-op), 2 = failed safe (auto.sh untouched)
+heal_auto_sh() {
+	if [ -f "$AUTO" ]; then
+		grep -q "# lodor-update-apply" "$AUTO" 2>/dev/null && return 1
+		if grep -q "# romm-syncd" "$AUTO" 2>/dev/null; then
+			awk -v ins="$APPLY_LINE" '/# romm-syncd/ && !done { print ins; done=1 } { print }' \
+				"$AUTO" > "$AUTO.new" 2>/dev/null || { rm -f "$AUTO.new" 2>/dev/null; return 2; }
+		else
+			# no syncd line (unexpected — something else started us): append, like install.sh
+			{ cat "$AUTO" && printf '%s\n' "$APPLY_LINE"; } > "$AUTO.new" 2>/dev/null \
+				|| { rm -f "$AUTO.new" 2>/dev/null; return 2; }
+		fi
+	else
+		# no auto.sh at all: create it in install.sh's shape (applier first, then our start line)
+		{ printf '#!/bin/sh\n\n'; printf '%s\n' "$APPLY_LINE"; printf '%s\n' "$SYNCD_LINE"; } \
+			> "$AUTO.new" 2>/dev/null || { rm -f "$AUTO.new" 2>/dev/null; return 2; }
+	fi
+	chmod +x "$AUTO.new" 2>/dev/null
+	mv -f "$AUTO.new" "$AUTO" 2>/dev/null || { rm -f "$AUTO.new" 2>/dev/null; return 2; }
+	return 0
+}
+heal_auto_sh; _hrc=$?
+if [ "$_hrc" = 0 ]; then
+	log "healed auto.sh: update applier hook"
+	# The whole point of the bug: a verified staging may ALREADY be waiting. Land it on THIS
+	# boot, not the next one — the applier is idempotent + READY-gated, and syncd startup at
+	# boot is a safe moment (not_in_game guard covers a mid-game manual restart). The applier
+	# killalls romm-syncd (us) before the swap, so it can't run as our synchronous child and
+	# leave a live daemon: hand off to a detached runner under a different comm ("sh"), which
+	# runs the applier, logs the outcome, then execs the (possibly just-updated) daemon.
+	if [ -f "$PAK/.update/READY" ] && [ -d "$PAK/.update/tree" ] && not_in_game; then
+		log "staged update found at heal: applying now (daemon hands off + restarts)"
+		sh -c 'sh "$1/bin/lodor-apply-update" >/dev/null 2>&1
+			echo "$(date "+%F %T") heal-apply done (outcome in update.log); restarting daemon" >> "$1/syncd.log"
+			exec "$1/bin/romm-syncd"' lodor-heal-apply "$PAK" &
+		exit 0
+	fi
+elif [ "$_hrc" = 2 ]; then
+	log "auto.sh heal FAILED (unwritable?) — applier hook still missing; daemon continuing"
+fi
+
 # last_attempt is a daemon-LOCAL timer that defers the first cycle by INTERVAL and paces subsequent
 # ones. It is deliberately NOT the shared freshness file: $LAST_FULL is written ONLY on a real
 # successful sync, because the minarch shim reads it to decide whether to skip the pre-game pull.

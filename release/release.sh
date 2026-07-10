@@ -476,22 +476,24 @@ else
   echo ">> LodorOS full card SKIPPED — no LODOR_BASE_CARD; overlays built, full card NOT cut." >&2
 fi
 
-# ---- launchers (LodorOS fork) per platform — FAILS CLOSED until wired into this pipeline ----
-# Until each platform build is driven from HERE (toolchain image + gate vs stock + symbol assert),
-# the release refuses to claim coverage it cannot reproduce. No silent partial "all platforms".
-# Miyoo-only fleet (pivot 2026-07-05). LODOR_BUILD_NONMIYOO=1 restores the archived set.
-if [ "${LODOR_BUILD_NONMIYOO:-0}" = 1 ]; then PLATFORMS="miyoomini my282 rg35xxplus my355 rgb30"
-else PLATFORMS="miyoomini my282 my355"; fi
-LAUNCHERS=""
-for p in $PLATFORMS; do
-  if [ -x "$ROOT/release/build-launcher-$p.sh" ]; then
-    sh "$ROOT/release/build-launcher-$p.sh" "$OUT" || fail "launcher build $p"
-    LAUNCHERS="$LAUNCHERS $p:wired"
-  else
-    LAUNCHERS="$LAUNCHERS $p:UNWIRED"
-  fi
-done
-case "$LAUNCHERS" in *UNWIRED*) echo "NOTE: launcher builds not yet wired into release ($LAUNCHERS) — engine artifacts gated+emitted; launcher coverage NOT claimed.";; esac
+# ---- launchers (LodorOS fork) per platform — OPT-IN + HARDWARE-GATED ----
+# LODOR_BUILD_LAUNCHERS=1 rebuilds minui.elf + minarch.real.elf for the Miyoo trio from the
+# TRACKED lodoros/workspace/ tree with the pinned device toolchain images, gating every
+# binary against the SHIPPED reference launchers (class/machine + interp + NEEDED parity +
+# glibc floor + fork marker) — release/build-launchers.sh. HARD RULE: the output lands in
+# $OUT/launchers/ ONLY and never enters an overlay, the full card, or any zip in EITHER
+# mode — a rebuilt launcher reaches a card exclusively via a human-run hardware boot test
+# on a SPARE card (see release/toolchains/README.md, "Miyoo trio"). The full card keeps
+# composing its launchers from LODOR_BASE_CARD regardless of this switch.
+if [ "${LODOR_BUILD_LAUNCHERS:-0}" = 1 ]; then
+  LAUNCHERS=$(sh "$ROOT/release/build-launchers.sh" "$OUT" "$REF") || fail "launcher rebuild/gate failed"
+  echo ">> launchers rebuilt + gated -> $OUT/launchers (HARDWARE BOOT TEST REQUIRED — in no shipped artifact):" >&2
+  printf '%s\n' "$LAUNCHERS" | sed 's/^/   /' >&2
+  LAUNCHERS=$(printf '%s' "$LAUNCHERS" | tr '\n' ';')
+else
+  LAUNCHERS="not rebuilt (riding base card)"
+  echo ">> launchers NOT rebuilt (riding base card; set LODOR_BUILD_LAUNCHERS=1 — hardware-gated, see release/toolchains/README.md)" >&2
+fi
 
 # ---- provenance manifest ----
 {

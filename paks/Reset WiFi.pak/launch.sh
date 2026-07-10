@@ -4,32 +4,72 @@
 # drives Lodor.pak's own machinery directly — bin/wifi-reset (the proven USB re-enum, rail
 # left ON) on the miyoomini's 8188fu, the stock Wifi.pak service cycle on SDIO radios — then
 # brings the link back up via the lib's verified path and reports the HONEST outcome.
-# On-screen messaging follows Update Lodor.pak's pattern: minui-presenter/minui-list borrowed
-# from the always-present Wifi.pak per-platform bins (say.elf is log-only on miyoomini — it
-# leaves the framebuffer black; see the lib's feedback section). NEVER a silent exit: every
+# On-screen messaging follows Update Lodor.pak's platform-gated pattern (#19): on miyoomini,
+# minui-presenter/killall wedges the framebuffer BLACK (presenter's signal handlers exit()
+# without GFX teardown; MinUI's miyoomini layer allocates the video surface from the SigmaStar
+# MI pool with no restore path) — so miyoomini uses MinUI's own SELF-EXITING tools instead:
+# show.elf draws res/<phase>.png for in-progress phases (fire-and-forget), foreground say.elf
+# blocks until A/B for terminal states and exits cleanly. NEVER kill/killall ANY process with
+# a video context on miyoomini. Other platforms keep the presenter/minui-list flow (borrowed
+# from the always-present Wifi.pak per-platform bins) unchanged. NEVER a silent exit: every
 # terminal state is drawn on-screen when the tools exist and is always logged.
 SDCARD="${SDCARD_PATH:-/mnt/SDCARD}"
 PLAT="${PLATFORM:-miyoomini}"
+PAKDIR="$(cd "$(dirname "$0")" && pwd)"   # absolute: show.elf wants an abs PNG path
 LODOR="$SDCARD/Tools/$PLAT/Lodor.pak"
 LOG="$LODOR/wifi-reset.log"
 log(){ echo "$(date +'%F %T') [pak] $1" >> "$LOG" 2>/dev/null; }
 
 arch=arm; uname -m 2>/dev/null | grep -q 64 && arch=arm64
 export PATH="$SDCARD/Tools/$PLAT/Wifi.pak/bin/$PLAT:$SDCARD/Tools/$PLAT/Wifi.pak/bin/$arch:$PATH"
-have_ui(){ command -v minui-presenter >/dev/null 2>&1; }
+MM=""; [ "$PLAT" = miyoomini ] && MM=1
+SYSBIN="$SDCARD/.system/$PLAT/bin"
+# have_ui is the presenter/list gate: HARD-FALSE on miyoomini so every presenter/killall branch
+# below is structurally unreachable there (asserted by test/miyoomini-ui-check.sh).
+have_ui(){ [ -z "$MM" ] && command -v minui-presenter >/dev/null 2>&1; }
+# mm_show <phase-key> — fire-and-forget: draw res/<phase-key>.png via show.elf (self-exits).
+mm_show(){
+	[ -x "$SYSBIN/show.elf" ] && [ -f "$PAKDIR/res/$1.png" ] || return 1
+	"$SYSBIN/show.elf" "$PAKDIR/res/$1.png" >/dev/null 2>&1
+}
+# mm_final <msg> — FOREGROUND say.elf: draws, blocks until A/B, exits through GFX teardown.
+# Never backgrounded, never killed. Degrades to log-only (the caller already logged).
+mm_final(){ [ -x "$SYSBIN/say.elf" ] && "$SYSBIN/say.elf" "$1" >/dev/null 2>&1; return 0; }
+
+# ui_hold <phase-key> <msg> — in-progress phase. miyoomini: draw res/<phase-key>.png ONCE per
+# phase, log every update (dynamic lines refresh the LOG, not the screen). Others: presenter.
 UI_PID=""
+MM_PHASE=""
 ui_hold(){
+	if [ -n "$MM" ]; then
+		log "MSG: $2"
+		[ "$1" = "$MM_PHASE" ] && return 0
+		MM_PHASE="$1"
+		mm_show "$1"
+		return 0
+	fi
 	if have_ui; then
 		killall minui-presenter >/dev/null 2>&1
-		minui-presenter --message "$1" --timeout -1 >/dev/null 2>&1 &
+		minui-presenter --message "$2" --timeout -1 >/dev/null 2>&1 &
 		UI_PID=$!
 	fi
-	log "MSG: $1"
+	log "MSG: $2"
 }
-ui_stop(){ [ -n "$UI_PID" ] && kill "$UI_PID" >/dev/null 2>&1; killall minui-presenter >/dev/null 2>&1; UI_PID=""; }
-# Terminal states must never flash past unread — A/B ack via minui-list (the Update pak's
-# ui_sticky pattern), degrading to a long presenter flash, then to log-only.
+# miyoomini: nothing to stop — show.elf already exited; the next draw replaces the screen.
+ui_stop(){
+	if [ -n "$MM" ]; then MM_PHASE=""; return 0; fi
+	[ -n "$UI_PID" ] && kill "$UI_PID" >/dev/null 2>&1; killall minui-presenter >/dev/null 2>&1; UI_PID="";
+}
+# Terminal states must never flash past unread. miyoomini: foreground say.elf (A/B ack, clean
+# exit — the safe acknowledger; NO minui-list and NO killall on this platform). Others: A/B ack
+# via minui-list, degrading to a long presenter flash, then to log-only.
 ui_sticky(){
+	if [ -n "$MM" ]; then
+		MM_PHASE=""
+		log "MSG: $1"
+		mm_final "$1"
+		return 0
+	fi
 	ui_stop
 	log "MSG: $1"
 	if have_ui && command -v minui-list >/dev/null 2>&1; then
@@ -52,7 +92,7 @@ export WIFI_LOG="$LODOR/wifi-debug.log"   # surface service-on/wait_net internal
 trap 'ui_stop; wifi_release' EXIT INT TERM HUP QUIT
 
 log "=== Reset WiFi pak start (plat=$PLAT) ==="
-ui_hold "Resetting Wi-Fi..."
+ui_hold resetting-wifi "Resetting Wi-Fi..."
 # The reset half. miyoomini 8188fu: the proven USB re-enum (bin/wifi-reset — power rail LEFT
 # ON, see that script's header). Every other platform has an SDIO radio — a USB unbind is
 # meaningless there, so cycle the stock Wifi.pak service instead (service-off here; the
@@ -75,14 +115,14 @@ log "reset done ($did) — bringing the link back up"
 
 # The bring-up half: the lib's verified path (service-on -> wpa COMPLETED -> real DHCP lease).
 # wifi_acquire narrates honest phases into /tmp/romm-phase; mirror them on-screen live.
-ui_hold "Reconnecting Wi-Fi..."
+ui_hold resetting-wifi "Reconnecting Wi-Fi..."
 rm -f /tmp/rw-rc 2>/dev/null
 ( if wifi_acquire fg; then echo 0 > /tmp/rw-rc; else echo $? > /tmp/rw-rc; fi ) &
 APID=$!
 _last=""
 while kill -0 "$APID" 2>/dev/null; do
 	ph="$(cat /tmp/romm-phase 2>/dev/null)"
-	if [ -n "$ph" ] && [ "$ph" != "$_last" ]; then _last="$ph"; ui_hold "$ph"; fi
+	if [ -n "$ph" ] && [ "$ph" != "$_last" ]; then _last="$ph"; ui_hold resetting-wifi "$ph"; fi
 	sleep 1
 done
 wait "$APID" 2>/dev/null

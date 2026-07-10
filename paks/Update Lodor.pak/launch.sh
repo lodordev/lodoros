@@ -10,9 +10,10 @@
 # can never look like "nothing happened":
 #   up-to-date  -> "You're on the latest version" (dismiss to exit)
 #   staged      -> "Downloaded <v> — reboot now to install" + a Reboot/Later choice
+#                  (miyoomini: a power-cycle message instead — no live reboot offer, see #19)
 #   unreachable -> "Couldn't reach the update server — check Wi-Fi" (distinct, not silence)
 set -u
-PAKDIR="$(dirname "$0")"
+PAKDIR="$(cd "$(dirname "$0")" && pwd)"   # absolute: show.elf wants an abs PNG path and we cd below
 SDCARD="${SDCARD_PATH:-/mnt/SDCARD}"
 PLAT="${PLATFORM:-miyoomini}"
 LODOR="$(dirname "$PAKDIR")/Lodor.pak"
@@ -33,18 +34,51 @@ set_setting(){
 }
 result_tok(){ printf '%s\n' "$1" | sed -n "s/.*$2=\([^ ]*\).*/\1/p" | head -1; }
 
-# --- on-screen UI (minui-presenter / minui-list) -----------------------------------
-# say.elf is log-only on miyoomini (it leaves the framebuffer black — see the lib), which is
-# exactly why this pak used to look blank. Borrow the proven minui-presenter/minui-list from
-# the always-present Wi-Fi pak (per-platform bins) — the same tools Tailscale.pak drives — so
-# every state is actually drawn on-screen. If they're missing we degrade to say() (log-only)
-# so the pak still stages correctly and never bricks; it just won't be visible.
+# --- on-screen UI (platform-gated backend) ------------------------------------------
+# miyoomini (#19, live-repro'd 0.9.7.7): NEVER run minui-presenter here and NEVER kill/killall
+# ANY process that owns a video context. The presenter's SIGTERM/SIGINT handlers call exit()
+# WITHOUT graphics teardown, and MinUI's miyoomini platform layer allocates the video surface
+# from the SigmaStar MI hardware pool with no restore path — so the old "background presenter,
+# killall it later" lifecycle wedged the framebuffer BLACK until reboot. (The old header here
+# blamed say.elf for the black screen; the killall was the actual mechanism.) The safe class on
+# this platform is MinUI's own SELF-EXITING tools:
+#   show.elf <abs .png>  — draws a 640x480 PNG straight to fb0, re-asserts the fb mode, exits in
+#                          milliseconds. Nothing to kill; replaced by drawing the next PNG.
+#   say.elf "<msg>"      — draws text, blocks until A/B, exits CLEANLY through GFX teardown.
+#                          FOREGROUND ONLY, terminal messages only: never background, never kill.
+#                          (The presenter author's own minui-wifi-pak special-cases miyoomini
+#                          the same way.)
+# So on miyoomini: transient phases draw pre-rendered res/<phase-key>.png (release/mkmsgpng.py,
+# committed); terminal states are foreground say.elf with the dynamic text; download percent is
+# LOG-ONLY (phase PNG stays up). Other platforms keep the proven minui-presenter/minui-list flow
+# UNCHANGED. If even show.elf is missing we degrade to say() (log-only) so the pak still stages
+# correctly and never bricks; it just won't be visible.
+MM=""; [ "$PLAT" = miyoomini ] && MM=1
+SYSBIN="$SDCARD/.system/$PLAT/bin"
 arch=arm; uname -m 2>/dev/null | grep -q 64 && arch=arm64
 export PATH="$SDCARD/Tools/$PLAT/Wifi.pak/bin/$PLAT:$SDCARD/Tools/$PLAT/Wifi.pak/bin/$arch:$PATH"
-have_ui(){ command -v minui-presenter >/dev/null 2>&1; }
+# have_ui is the presenter/list gate: HARD-FALSE on miyoomini so every presenter/killall branch
+# below is structurally unreachable there (asserted by test/miyoomini-ui-check.sh).
+have_ui(){ [ -z "$MM" ] && command -v minui-presenter >/dev/null 2>&1; }
+
+# mm_show <phase-key> — fire-and-forget: draw res/<phase-key>.png via show.elf (self-exits).
+mm_show(){
+	[ -x "$SYSBIN/show.elf" ] && [ -f "$PAKDIR/res/$1.png" ] || return 1
+	"$SYSBIN/show.elf" "$PAKDIR/res/$1.png" >/dev/null 2>&1
+}
+# mm_final <msg> — FOREGROUND say.elf: draws, blocks until A/B, exits through GFX teardown.
+mm_final(){
+	if [ -x "$SYSBIN/say.elf" ]; then
+		"$SYSBIN/say.elf" "$1" >/dev/null 2>&1
+	else
+		say "$1"; sleep 4; clear_say
+	fi
+}
 
 # ui_flash <msg> [secs] — a timed on-screen line (auto-dismisses). Used for transient steps.
+# miyoomini: log-only — no PNG for one-off tips, and nothing may be spawned that needs killing.
 ui_flash(){
+	if [ -n "$MM" ]; then log "ui: $1"; return 0; fi
 	if have_ui; then
 		killall minui-presenter >/dev/null 2>&1
 		minui-presenter --message "$1" --timeout "${2:-3}" >/dev/null 2>&1
@@ -52,21 +86,37 @@ ui_flash(){
 		say "$1"; sleep "${2:-3}"; clear_say
 	fi
 }
-# ui_hold <msg> — draw a line that PERSISTS until replaced/killed (for in-progress phases).
+# ui_hold <phase-key> <msg> — a line that PERSISTS through an in-progress phase.
+# miyoomini: draw res/<phase-key>.png ONCE per phase (fire-and-forget), log every update —
+# dynamic lines (download percent) refresh the LOG, not the screen. Others: presenter hold.
 UI_PID=""
+MM_PHASE=""
 ui_hold(){
+	if [ -n "$MM" ]; then
+		log "ui: $2"
+		[ "$1" = "$MM_PHASE" ] && return 0
+		MM_PHASE="$1"
+		mm_show "$1" || say "$2"
+		return 0
+	fi
 	if have_ui; then
 		killall minui-presenter >/dev/null 2>&1
-		minui-presenter --message "$1" --timeout -1 >/dev/null 2>&1 &
+		minui-presenter --message "$2" --timeout -1 >/dev/null 2>&1 &
 		UI_PID=$!
 	else
-		say "$1"
+		say "$2"
 	fi
 }
-ui_stop(){ [ -n "$UI_PID" ] && kill "$UI_PID" >/dev/null 2>&1; killall minui-presenter >/dev/null 2>&1; UI_PID=""; clear_say; }
+# miyoomini: nothing to stop — show.elf already exited; the next draw replaces the screen.
+ui_stop(){
+	if [ -n "$MM" ]; then MM_PHASE=""; return 0; fi
+	[ -n "$UI_PID" ] && kill "$UI_PID" >/dev/null 2>&1; killall minui-presenter >/dev/null 2>&1; UI_PID=""; clear_say
+}
 # ui_sticky <msg> — a terminal message the user must acknowledge (A/B) so it can never flash
-# past. Falls back to a long flash if minui-list is unavailable.
+# past. miyoomini: foreground say.elf (the safe acknowledger). Others: minui-list, falling
+# back to a long flash if minui-list is unavailable.
 ui_sticky(){
+	if [ -n "$MM" ]; then log "ui final: $1"; mm_final "$1"; return 0; fi
 	if have_ui && command -v minui-list >/dev/null 2>&1; then
 		killall minui-presenter >/dev/null 2>&1
 		printf 'OK\n' > /tmp/upd-ack
@@ -86,6 +136,14 @@ trap 'ui_stop; wifi_release' EXIT INT TERM HUP QUIT
 # sequence (sync first; busybox reboot -> sysrq -> poweroff fallback). "Later" just exits; the
 # boot applier picks the staged tree up on the next real reboot regardless.
 offer_reboot(){
+	if [ -n "$MM" ]; then
+		# miyoomini: NO interactive reboot offer — presenting the choice needs minui-list and a
+		# live-reboot path, and the boot applier makes a plain power cycle sufficient anyway.
+		# One foreground say.elf terminal message; the user powers off whenever they like.
+		log "ui final: $1 (miyoomini: power-cycle message, no reboot offer)"
+		mm_final "Update downloaded. Turn the device off and on to install. Powering off is always safe."
+		return 0
+	fi
 	if have_ui && command -v minui-list >/dev/null 2>&1; then
 		killall minui-presenter >/dev/null 2>&1
 		printf 'Reboot now\nLater\n' > /tmp/upd-reboot
@@ -111,7 +169,11 @@ offer_reboot(){
 	fi
 }
 
-[ -x "$SYNC_BIN" ] || { ui_flash "Update: the sync engine is missing." 4; exit 1; }
+# A failure terminal state: sticky on miyoomini (say.elf); the original timed flash elsewhere.
+if [ ! -x "$SYNC_BIN" ]; then
+	if [ -n "$MM" ]; then ui_sticky "Update: the sync engine is missing."; else ui_flash "Update: the sync engine is missing." 4; fi
+	exit 1
+fi
 
 # Already staged from a prior run: don't re-download, just tell them (sticky) and offer a reboot.
 if [ -f "$LODOR/.update/READY" ]; then
@@ -121,11 +183,11 @@ if [ -f "$LODOR/.update/READY" ]; then
 	exit 0
 fi
 
-ui_hold "Connecting to Wi-Fi..."
+ui_hold connecting-wifi "Connecting to Wi-Fi..."
 if ! wifi_acquire; then ui_sticky "Couldn't reach the update server — check Wi-Fi."; exit 1; fi
 set_clock || log "clock set failed - continuing"
 
-ui_hold "Checking for updates..."
+ui_hold checking-updates "Checking for updates..."
 OUT="$("$SYNC_BIN" --check-update 2>>"$LOG")"; RC=$?
 log "check-update rc=$RC: $OUT"
 if [ "$RC" != 0 ]; then
@@ -139,7 +201,11 @@ LATEST="$(result_tok "$OUT" latest)"
 CURRENT="$(result_tok "$OUT" current)"
 if [ "$(result_tok "$OUT" update)" != "1" ]; then
 	set_setting update_available ""
-	ui_sticky "You're on the latest version ($CURRENT)."
+	if [ -n "$MM" ]; then
+		ui_sticky "You're up to date ($CURRENT)."
+	else
+		ui_sticky "You're on the latest version ($CURRENT)."
+	fi
 	exit 0
 fi
 set_setting update_available "$LATEST"
@@ -188,7 +254,8 @@ fi
 # bridge the NextUI pre-launch fetch hook uses, adapted to minui-presenter.)
 rm -f /tmp/dl-progress /tmp/romm-phase 2>/dev/null
 # #8: the pre-download line carries the changelog — this is the consent moment for the bytes.
-ui_hold "Downloading Lodor $LATEST...${NOTES:+
+# (miyoomini: the changelog still reaches the user — offer_reboot's final say.elf and the log.)
+ui_hold downloading-update "Downloading Lodor $LATEST...${NOTES:+
 New: $NOTES}"
 ( LODOR_UPDATE_ASSET="lodoros-$PLAT" "$SYNC_BIN" --fetch-update >/tmp/upd-fetch-out 2>>"$LOG"; echo $? > /tmp/upd-fetch-rc ) &
 DLPID=$!
@@ -201,7 +268,7 @@ while kill -0 "$DLPID" 2>/dev/null; do
 		''|*[!0-9]*) line="$ph" ;;
 		*)           line="$ph  ${pct}%" ;;
 	esac
-	if [ "$line" != "$_lastline" ]; then _lastline="$line"; ui_hold "$line"; fi
+	if [ "$line" != "$_lastline" ]; then _lastline="$line"; ui_hold downloading-update "$line"; fi
 	sleep 1
 done
 wait "$DLPID" 2>/dev/null
