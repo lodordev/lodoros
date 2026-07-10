@@ -173,12 +173,17 @@ _lodor_session --session-end
 #   * WiFi DOWN (offline): just record the ROM as pending upload — NO sync, NO WiFi, instant return to
 #     the menu. This device is often off-WiFi and a quit must NEVER block on/cold-cycle the radio. The
 #     root-menu pending badge reminds the user to upload when they next have WiFi (offline-first).
-# MULTI-USER: the offline upload queue is per-profile (pending-saves.<profile>.txt) so
-# one user's quit never queues another's save. LODOR_PROFILE is inherited from the boot
-# env; unset/"default" keeps the historical un-namespaced pending-saves.txt.
-_PROF="${LODOR_PROFILE:-}"
-case "$_PROF" in ""|default) PENDING="$SDCARD/Tools/$PLAT/Lodor.pak/pending-saves.txt" ;;
-  *) _PT=$(printf %s "$_PROF" | tr -c 'A-Za-z0-9._-' '_'); PENDING="$SDCARD/Tools/$PLAT/Lodor.pak/pending-saves.$_PT.txt" ;; esac
+# OFFLINE UPLOAD QUEUE: one FLAT pending-saves.txt — the SAME file the engine drainer
+# (lodor-sync --push-pending / pending.go pendingPath()), the daemon has_pending gate
+# (romm-syncd), the wizard pending badge, and the download queue lock all read/drain.
+# It MUST stay flat: a profile-namespaced file (pending-saves.<profile>.txt) is written
+# but NOTHING drains it, so an offline save queued under a profile silently never uploads
+# while Sync Now reports success on the empty flat file (data-loss + fake-success). Multi-
+# user correctness comes from the per-profile Saves/<profile> dir + active-profile
+# resolution at DRAIN time (SavesDir()/findLocalSavesForRom), NOT from the queue filename:
+# a bare ROM line resolves against the booted profile's SavesDir(), so a shared flat queue
+# cannot cross-mix saves. (2026-07-10 #bugshell: reverted the namespaced writer.)
+PENDING="$SDCARD/Tools/$PLAT/Lodor.pak/pending-saves.txt"
 if [ -n "$ROM" ]; then
 	_rb=$(basename "$ROM"); _rbne="${_rb%.*}"
 	# any save file for THIS rom modified since the game started (INGAME_LOCK's mtime = launch)?
@@ -196,6 +201,7 @@ if [ -n "$ROM" ]; then
 	# the `[`->`[[]` pass can't re-mangle a just-emitted bracket, then placeholder->`[]]`.
 	_rb_g=$(printf %s "$_rb" | sed -e 's/\]/@LODORRB@/g' -e 's/\[/[[]/g' -e 's/@LODORRB@/[]]/g')
 	_rbne_g=$(printf %s "$_rbne" | sed -e 's/\]/@LODORRB@/g' -e 's/\[/[[]/g' -e 's/@LODORRB@/[]]/g')
+	_save_changed=0
 	if find "${SAVES_PATH:-$SDCARD/Saves}" \( \
 		-iname "$_rb_g.srm" -o -iname "$_rb_g.sav" -o -iname "$_rb_g.dsv" \
 		-o -iname "$_rb_g.mcr" -o -iname "$_rb_g.mcd" -o -iname "$_rb_g.brm" \
@@ -208,14 +214,42 @@ if [ -n "$ROM" ]; then
 		-o -iname "$_rbne_g.mpk" -o -iname "$_rbne_g.nv" -o -iname "$_rbne_g.rtc" \
 		-o -iname "$_rbne_g.state*" \
 	\) 2>/dev/null | grep -q .; then
+		_save_changed=1
+	fi
+
+	# SAVE handling — gated on an actual save-file change (as before).
+	#   online  -> $HELPER push: pushes the changed save AND (Handoff v1) its states, then drains
+	#              the offline state queue. _pushed_online records that states are already covered
+	#              so the independent state step below doesn't double-push the same warm link.
+	#   offline -> queue the ROM for later save upload (states are queued by the state step below).
+	_pushed_online=0
+	if [ "$_save_changed" = 1 ]; then
 		if [ -x "$HELPER" ] && romm_wifi_up; then
 			if command -v timeout >/dev/null 2>&1; then
 				timeout 30 "$HELPER" push "$ROM" >/dev/null 2>&1
 			else
 				"$HELPER" push "$ROM" >/dev/null 2>&1
 			fi
+			_pushed_online=1
 		else
 			grep -qxF "$ROM" "$PENDING" 2>/dev/null || echo "$ROM" >> "$PENDING"
+		fi
+	fi
+
+	# SAVE-STATE handling — DECOUPLED from the save-file gate (task: los-statesync). A state-only
+	# session (quicksave, no battery save written) used to sync NOTHING: the save block above never
+	# fired, so states never reached RomM and were never queued offline. This block runs on EVERY
+	# exit, independent of whether a save changed. Same warm-link-only rule + `timeout` guard the
+	# save push uses — a quit NEVER cold-cycles the radio or blocks the return to the menu.
+	#   online  -> $HELPER push: --push-save (cheap MD5 dedup no-op when the save is unchanged) +
+	#              --push-states + --push-pending-states. Skipped when _pushed_online already ran it.
+	#   offline -> $HELPER push hits the helper's offline branch, which runs --queue-state <rom>
+	#              (instant, WiFi-dark) — mirroring romm-session-sync's own offline state queue.
+	if [ -x "$HELPER" ] && [ "$_pushed_online" != 1 ]; then
+		if command -v timeout >/dev/null 2>&1; then
+			timeout 30 "$HELPER" push "$ROM" >/dev/null 2>&1 || true
+		else
+			"$HELPER" push "$ROM" >/dev/null 2>&1 || true
 		fi
 	fi
 fi

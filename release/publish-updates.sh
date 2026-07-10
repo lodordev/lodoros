@@ -18,14 +18,20 @@ OUTDIR=${1:?usage: publish-updates.sh <release-out-dir> [--beta]}
 shift
 BETA=""
 [ "${1:-}" = "--beta" ] && BETA="--beta"
+# When a NextUI pak is published in the SAME release event, pass its version so the
+# self-update manifest can advance notify.nextui honestly (else it is preserved from base).
+NEXTUI_ARG=""
+[ -n "${LODOR_NEXTUI_VERSION:-}" ] && NEXTUI_ARG="--nextui-version $LODOR_NEXTUI_VERSION"
 VERSION=$(cat "$ROOT/VERSION")
 TAG="v$VERSION"
 REPO_SLUG="lodordev/lodor"
+export LODOR_PII_REQUIRED=1   # private-mono caller: PII/branding gates must NOT fail open
 fail(){ echo "PUBLISH ABORT: $*" >&2; exit 1; }
 hash(){ sha256sum "$1" | cut -d" " -f1; }
 
-TOK="${GITHUB_TOKEN:-$(cat "$HOME/.claude/secrets/github-pat" 2>/dev/null || true)}"
-[ -n "$TOK" ] || fail "no GitHub token (GITHUB_TOKEN or ~/.claude/secrets/github-pat)"
+TOKFILE="${LODOR_GH_TOKEN_FILE:-$HOME/.config/lodor/github-token}"
+TOK="${GITHUB_TOKEN:-$(cat "$TOKFILE" 2>/dev/null || true)}"
+[ -n "$TOK" ] || fail "no GitHub token (GITHUB_TOKEN or $TOKFILE)"
 api(){ # api <method> <path> [json]
   if [ -n "${3:-}" ]; then
     curl -sfS -X "$1" -H "Authorization: Bearer $TOK" -H "Accept: application/vnd.github+json" -d "$3" "https://api.github.com$2"
@@ -43,8 +49,30 @@ else
   echo "  no live manifest yet (first publish) - starting fresh"
 fi
 # shellcheck disable=SC2086
-sh "$ROOT/release/mkversions.sh" "$OUTDIR" $BETA $BASEARG
+sh "$ROOT/release/mkversions.sh" "$OUTDIR" $BETA $BASEARG $NEXTUI_ARG
 sh "$ROOT/release/gate.sh" update-manifest "$OUTDIR/versions.json" "$TAG" || fail "update-manifest gate"
+
+# Sign the manifest with the OFFLINE ed25519 key (security HIGH #4): devices
+# verify this signature before trusting any hash. Signing runs AFTER the gate so
+# we only ever sign a well-formed manifest. The key is read by PATH from the
+# release host (out of repo, like the Android keystore); it is never copied in.
+# LODOR_UPDATE_SIGNING_KEY overrides the default path if set.
+echo "  signing versions.json (ed25519)"
+# Docker volume mounts + go-run-after-cd both require an ABSOLUTE manifest path.
+OUTDIR_ABS=$(cd "$OUTDIR" && pwd)
+if command -v go >/dev/null 2>&1; then
+  ( cd "$ROOT/release/cmd/lodor-signmanifest" && go run . "$OUTDIR_ABS/versions.json" ) \
+    || fail "manifest signing (lodor-signmanifest)"
+else
+  docker run --rm \
+    -v "$ROOT/release/cmd/lodor-signmanifest":/src \
+    -v "$OUTDIR_ABS":/out \
+    -v "${LODOR_UPDATE_SIGNING_KEY:-/mnt/user/appdata/lodor/update-signing-ed25519.key}":/key:ro \
+    -w /src -e LODOR_UPDATE_SIGNING_KEY=/key \
+    golang:1.25-bookworm go run . /out/versions.json \
+    || fail "manifest signing (lodor-signmanifest, docker)"
+fi
+[ -f "$OUTDIR/versions.json.sig" ] || fail "signer produced no versions.json.sig"
 
 echo "== 2/4 release $TAG on $REPO_SLUG =="
 _pre=false; [ -n "$BETA" ] && _pre=true
@@ -53,10 +81,11 @@ _body=$(python3 -c 'import json,sys; print(json.dumps({"tag_name":sys.argv[1],"n
 _rel=$(api POST "/repos/$REPO_SLUG/releases" "$_body") || fail "release create (does $TAG already exist?)"
 _relid=$(printf '%s' "$_rel" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
 
+sh "$ROOT/release/gate.sh" secrets "$OUTDIR" || fail "secrets gate (release out dir)"
 echo "== 3/4 upload assets =="
-for f in "$OUTDIR"/Lodor-LodorOS-update-*-"$VERSION".zip "$OUTDIR/versions.json"; do
+for f in "$OUTDIR"/Lodor-LodorOS-update-*-"$VERSION".zip "$OUTDIR/versions.json" "$OUTDIR/versions.json.sig"; do
   [ -f "$f" ] || fail "missing artifact: $f"
-  _ct="application/zip"; case "$f" in *.json) _ct="application/json";; esac
+  _ct="application/zip"; case "$f" in *.json) _ct="application/json";; *.sig) _ct="text/plain";; esac
   curl -sfS -X POST -H "Authorization: Bearer $TOK" -H "Content-Type: $_ct" \
     --data-binary @"$f" \
     "https://uploads.github.com/repos/$REPO_SLUG/releases/$_relid/assets?name=$(basename "$f")" >/dev/null \

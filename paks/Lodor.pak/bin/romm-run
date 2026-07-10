@@ -127,6 +127,18 @@ out="$(CFW=MinUI LODOR_HOST_OS=lodoros MINUI_DEVICE="$PLAT" IS_MIYOO=1 SDCARD_PA
 rc=$?
 printf '%s\n' "$out"
 printf '%s\n' "$out" >> "$LOG"
+# HANDOFF FIX (device Sync Now): the compiled LodorOS launcher calls this wrapper with
+# --push-pending (battery saves only) — its Sync Now has no save-STATE step (that path lives
+# in the compiled launcher, not rebuilt here). Piggyback the state push on the SAME warm link
+# so Sync Now uploads save-states too. Best-effort, logged to $LOG (not stdout) so the
+# launcher's --push-pending parse is untouched. Idempotent (the engine dedups vs the ledger).
+case " $* " in
+  *" --push-pending "*)
+    log "handoff: piggyback push-all-states on Sync Now"
+    CFW=MinUI LODOR_HOST_OS=lodoros MINUI_DEVICE="$PLAT" IS_MIYOO=1 SDCARD_PATH="$SDCARD" PLATFORM="$PLAT" LODOR_PROFILE="${LODOR_PROFILE:-}" SAVES_PATH="${SAVES_PATH:-}" "$BIN" --push-all-states >> "$LOG" 2>&1 || true
+    CFW=MinUI LODOR_HOST_OS=lodoros MINUI_DEVICE="$PLAT" IS_MIYOO=1 SDCARD_PATH="$SDCARD" PLATFORM="$PLAT" LODOR_PROFILE="${LODOR_PROFILE:-}" SAVES_PATH="${SAVES_PATH:-}" "$BIN" --push-pending-states >> "$LOG" 2>&1 || true
+    ;;
+esac
 # Launcher double-redirects --sync-feed (>feed inside the overlay's >romm-out wrapper) so the feed lands
 # in the wrong file; mirror it explicitly to the file the launcher reads.
 [ "$1" = "--sync-feed" ] && printf '%s\n' "$out" > /tmp/lodor-feed.txt 2>/dev/null

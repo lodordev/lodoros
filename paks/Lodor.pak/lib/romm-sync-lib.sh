@@ -118,7 +118,7 @@ esac
 _UDHCPC_SCRIPT="${UDHCPC_SCRIPT:-/etc/init.d/udhcpc.script}"
 _have_up()  { [ "$(cat /sys/class/net/wlan0/operstate 2>/dev/null)" = "up" ]; }
 _have_ip()  { ip addr show wlan0 2>/dev/null | grep -q "inet "; }
-_have_dns() { nslookup "$ROMM_HOST" >/dev/null 2>&1; }
+_have_dns() { nslookup "${ROMM_HOST:-}" >/dev/null 2>&1; }
 _assoc_complete() {
 	[ -x "$_WPA_CLI" ] || return 1
 	# shellcheck disable=SC2086  # $_WPA_CP is a deliberate arg list (empty -> no-op on non-my355)
@@ -251,7 +251,7 @@ wait_net() {
 # whenever we have an IP but the RomM host check fails, to distinguish "no resolver configured" vs
 # "host doesn't resolve" vs "resolves but TCP blocked". Temporary; never gates Wi-Fi success.
 _net_diag() {
-	[ -n "$ROMM_HOST" ] || { _wlog "net-diag: ROMM_HOST unset, skipping"; return 0; }
+	[ -n "${ROMM_HOST:-}" ] || { _wlog "net-diag: ROMM_HOST unset, skipping"; return 0; }
 	{
 		echo "--- net-diag $(date +'%F %T') host=$ROMM_HOST port=${ROMM_PORT:-443} ip=$(_wlan_ip) ---"
 		echo "[resolv.conf]"; cat /etc/resolv.conf 2>&1
@@ -814,6 +814,21 @@ wifi_scan_flagged() {
 wifi_save_network() {
 	_ssid="$1"; _psk="$2"
 	[ -n "$_ssid" ] || { _wlog "wifi_save_network: empty SSID"; return 1; }
+	# SECURITY: SSID/PSK are interpolated verbatim into wpa_supplicant.conf ssid="..."/psk="..."
+	# by _wifi_write_config. A literal double-quote or newline would break out of the quoted field
+	# and inject arbitrary wpa_supplicant directives (or a second network{} block). We do NOT try to
+	# escape (wpa_supplicant's quoted-string grammar has no escape for "), we REJECT: a credential
+	# carrying " or a newline is malformed for this config format. Fail with an honest line.
+	for _fld in "$_ssid" "$_psk"; do
+		case "$_fld" in
+			*'"'*) _wlog "wifi_save_network: SSID/PSK contains a double-quote (\") -- rejected (would break wpa_supplicant.conf quoting)"; return 1 ;;
+		esac
+		# newline detection: a value spanning >1 line differs from its first line.
+		if [ "$_fld" != "$(printf '%s' "$_fld" | head -1)" ]; then
+			_wlog "wifi_save_network: SSID/PSK contains a newline -- rejected (would inject wpa_supplicant directives)"
+			return 1
+		fi
+	done
 	touch "$SDCARD/wifi.txt" 2>/dev/null
 	# drop any existing entry for this SSID, then prepend the new one (priority = first line).
 	_tmp="$SDCARD/wifi.txt.tmp.$$"
@@ -995,7 +1010,7 @@ set_clock() {
 	if [ -n "$_yr" ] && [ "$_yr" -ge 2024 ] 2>/dev/null; then return 0; fi
 	if command -v ntpd >/dev/null 2>&1 && _clk_try 15 ntpd -q -n -p 162.159.200.123 >/dev/null 2>&1; then _persist_clock; return 0; fi
 	if command -v sntp >/dev/null 2>&1 && _clk_try 10 sntp -sS 162.159.200.123 >/dev/null 2>&1; then _persist_clock; return 0; fi
-	d="$(_clk_try 10 wget -S -q -O /dev/null "http://$ROMM_HOST/" 2>&1 | sed -n 's/^ *Date: //p' | head -1)"
+	d="$(_clk_try 10 wget -S -q -O /dev/null "http://${ROMM_HOST:-}/" 2>&1 | sed -n 's/^ *Date: //p' | head -1)"
 	if [ -n "$d" ] && date -s "$d" >/dev/null 2>&1; then _persist_clock; return 0; fi
 	return 1
 }
@@ -1084,6 +1099,12 @@ run_sync() {
 	  # and refresh the Continue cache. Worst exit code wins.
 	  worst=0
 	  "$SYNC_BIN" --push-pending;       rc=$?; [ "$rc" -gt "$worst" ] && worst=$rc
+	  # Save-STATES (task: los-statesync): "Sync Now" pushed battery-saves but never STATES.
+	  # --push-all-states pushes every ROM's local states in one call (counts toward $worst so a
+	  # real failure surfaces); --push-pending-states then drains any states queued from offline
+	  # stops (best-effort — a drain miss must never wedge Sync Now).
+	  "$SYNC_BIN" --push-all-states;    rc=$?; [ "$rc" -gt "$worst" ] && worst=$rc
+	  "$SYNC_BIN" --push-pending-states || true
 	  # Playtime cross-device merge (#146): pull peers' .lodortime meta-saves and fold
 	  # them into totals.tsv. Best-effort telemetry - never counts toward $worst.
 	  "$SYNC_BIN" --sync-playtime || true

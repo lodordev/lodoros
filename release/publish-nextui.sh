@@ -25,6 +25,7 @@
 set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 GATE="$ROOT/release/gate.sh"
+export LODOR_PII_REQUIRED=1   # private-mono caller: PII/branding gates must NOT fail open
 VERSION=$(cat "$ROOT/VERSION" 2>/dev/null || true)
 [ -n "$VERSION" ] || { echo "ABORT: $ROOT/VERSION missing/empty — publishing wants an explicit version" >&2; exit 1; }
 OUT="$ROOT/release/out/nextui-$VERSION"
@@ -66,6 +67,7 @@ stage(){
   [ -f "$STAGE/config.json.template" ] || fail "config.json.template missing after strip"
 
   echo "== gates (store-zip stage) =="
+  sh "$GATE" secrets         "$STAGE" || fail "secrets gate"
   sh "$GATE" branding        "$STAGE" || fail "branding gate"
   sh "$GATE" no-legacy       "$STAGE" || fail "no-legacy gate"
   sh "$GATE" cruft           "$STAGE" || fail "cruft gate"
@@ -85,8 +87,8 @@ stage(){
 }
 
 github(){ # github <method> <path> [json-body]  — minimal API driver (no gh dependency)
-  _tok="${GITHUB_TOKEN:-$(cat "$HOME/.claude/secrets/github-pat" 2>/dev/null || true)}"
-  [ -n "$_tok" ] || fail "no GitHub token (GITHUB_TOKEN or ~/.claude/secrets/github-pat)"
+  _tok="${GITHUB_TOKEN:-$(cat "${LODOR_GH_TOKEN_FILE:-$HOME/.config/lodor/github-token}" 2>/dev/null || true)}"
+  [ -n "$_tok" ] || fail "no GitHub token (GITHUB_TOKEN or $LODOR_GH_TOKEN_FILE)"
   if [ -n "${3:-}" ]; then
     curl -sfS -X "$1" -H "Authorization: Bearer $_tok" -H "Accept: application/vnd.github+json" \
       -d "$3" "https://api.github.com$2"
@@ -121,7 +123,7 @@ publish(){
   _relid=$(printf '%s' "$_rel" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
 
   echo "== 3/5 upload assets =="
-  _tok="${GITHUB_TOKEN:-$(cat "$HOME/.claude/secrets/github-pat")}"
+  _tok="${GITHUB_TOKEN:-$(cat "${LODOR_GH_TOKEN_FILE:-$HOME/.config/lodor/github-token}")}"
   for f in "$ZIPF" "$FULLZIP"; do
     curl -sfS -X POST -H "Authorization: Bearer $_tok" -H "Content-Type: application/zip" \
       --data-binary @"$f" \
@@ -139,14 +141,26 @@ publish(){
     echo "  ok: $(basename "$f") live + hash-verified"
   done
 
-  echo "== 5/5 bump pak.json (the store-visible manifest) =="
-  python3 - "$NGIT/pak.json" "$VERSION" "$NOTES" <<'PY' || fail "pak.json bump"
+  echo "== 5/5 write pak.json from tracked source + bump (the store-visible manifest) =="
+  # The store manifest is SOURCED from the mono (integrations/nextui/pak.store.json) so tracked
+  # fields — scripts.post_uninstall (#30), update_ignore, platforms — reach the store instead of
+  # drifting in the clone. We overlay this release's version and MERGE changelog history from
+  # whatever the clone already published (never lose past entries).
+  python3 - "$ROOT/integrations/nextui/pak.store.json" "$NGIT/pak.json" "$VERSION" "$NOTES" <<'PY' || fail "pak.json bump"
 import json, sys
-p, ver, notes = sys.argv[1], sys.argv[2], sys.argv[3]
-d = json.load(open(p))
+src, dst, ver, notes = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+d = json.load(open(src))
+prev = {}
+try:
+    prev = json.load(open(dst)).get("changelog", {})
+except Exception:
+    pass
+cl = dict(d.get("changelog", {}))
+cl.update(prev)
+cl[ver] = notes
+d["changelog"] = cl
 d["version"] = ver
-d.setdefault("changelog", {})[ver] = notes
-open(p, "w").write(json.dumps(d, indent=2) + "\n")
+open(dst, "w").write(json.dumps(d, indent=2, ensure_ascii=False) + "\n")
 PY
   ( cd "$NGIT" && git add pak.json && git commit -q -m "Lodor $VERSION" && git push -q origin HEAD ) \
     || fail "pak.json push"

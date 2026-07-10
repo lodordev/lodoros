@@ -3184,7 +3184,10 @@ static void Lodor_runWithProgress(SDL_Surface* screen, const char* label, const 
 	int lodor_offered = 0;
 	for (int lodor_attempt = 0; lodor_attempt < 2; lodor_attempt++) {
 
-	system("rm -f /tmp/romm-done /tmp/romm-phase /tmp/dl-progress /tmp/romm-wifi-fail 2>/dev/null");
+	// Also clear the cover-cancel sentinel (#26): a leftover from a previous run's
+	// B-press must never pre-cancel this run's box-art fetch. The engine clears it too,
+	// belt-and-suspenders.
+	system("rm -f /tmp/romm-done /tmp/romm-phase /tmp/dl-progress /tmp/romm-wifi-fail /tmp/lodor-cover-cancel 2>/dev/null");
 
 	char cmd[MAX_PATH*4];
 	snprintf(cmd, sizeof(cmd),
@@ -3201,6 +3204,12 @@ static void Lodor_runWithProgress(SDL_Surface* screen, const char* label, const 
 		PAD_poll();
 		if (!cancelling && (PAD_justPressed(BTN_B) || PAD_justPressed(BTN_MENU))) {
 			cancelling = 1; // soft-cancel: stop here, but DO NOT kill the bg op
+			// #26: touch the cover-cancel sentinel so the engine's box-art fetch loop
+			// aborts the in-flight cover and skips the rest — otherwise "Cancelling..."
+			// hangs until the current cover's slow-radio download times out. The stub /
+			// index / save / state work is unaffected; only the cosmetic cover pass reads
+			// this file. Best-effort touch; the engine polls it between covers.
+			system("touch /tmp/lodor-cover-cancel 2>/dev/null");
 		}
 
 		char phase[256];

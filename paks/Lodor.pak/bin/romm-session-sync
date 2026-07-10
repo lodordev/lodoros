@@ -69,13 +69,36 @@ if wifi_acquire "$_ACQ"; then
 	#    quit) and the radio is never powered down here (wifi_release drops the mutex only).
 	if [ "$PHASE" = push ]; then
 		run_sync --push-save "$ROM" >> "$SESSION_LOG" 2>&1
+		rc=$?
+		# Handoff v1: push new save STATES on the warm link too (additive; engine
+		# dedups; dark without statecores.json; never affects rc/contract), then
+		# drain any states queued from offline stops.
+		run_sync --push-states "$ROM" >> "$SESSION_LOG" 2>&1 || true
+		run_sync --push-pending-states >> "$SESSION_LOG" 2>&1 || true
+	elif [ -x "$PAK/lodor-wizard" ]; then
+		# Launch gate (Handoff, task #24 - 2026-07-07): the wizard probes
+		# for anything NEWER (save lineage; unseen compatible state) and shows the
+		# interactive launch card ONLY then - silent pass-through otherwise. Wizard
+		# not shipped in this pak build -> the old silent sync below (honest
+		# degradation; release.sh only started bundling it post-0.9.6). resolv +
+		# tier-1 prep first: the wizard's engine probes bypass run_sync's plumbing.
+		_ensure_resolv
+		lodor_tier1_up
+		LODOR_BIN="$PAK/lodor-sync" \
+			timeout 90 "$PAK/lodor-wizard" --launch-card "$ROM" >> "$SESSION_LOG" 2>&1 || true
+		rc=0
 	else
 		run_sync --sync-save "$ROM" >> "$SESSION_LOG" 2>&1
+		rc=$?
 	fi
-	rc=$?
 	wifi_release
 	echo "$(date +'%F %T') [$PHASE] rom=$ROM rc=$rc" >> "$SESSION_LOG"
 else
+	if [ "$PHASE" = push ]; then
+		# Handoff v1: no link — record the possibly-unpushed states for the
+		# online drain (--queue-state is offline + instant, never blocks a quit).
+		run_sync --queue-state "$ROM" >> "$SESSION_LOG" 2>&1 || true
+	fi
 	echo "$(date +'%F %T') [$PHASE] wifi busy/unavailable rom=$ROM" >> "$SESSION_LOG"
 fi
 exit 0

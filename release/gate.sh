@@ -73,6 +73,37 @@ cmd_static_go(){
   ok "static-go: $bin is interp-less + dependency-free (CGO-free invariant holds)"
 }
 
+cmd_android_engine(){
+  # The Android engine is deliberately NOT static: Go's android/arm64 port emits a
+  # bionic-linked PIE whose PT_INTERP is /system/bin/linker64 (internal linking, no
+  # libc). Verify exactly that shape AND that it stayed pure Go (zero NEEDED libs) —
+  # static-go would wrongly fail it; a linux-GOOS binary here would wrongly PASS
+  # static-go and then fail to exec on-device. Run inside the golang image (readelf).
+  bin=${1:?bin}; [ -f "$bin" ] || fail "no such binary: $bin"
+  command -v readelf >/dev/null 2>&1 || fail "android-engine: readelf unavailable (run inside the golang image)"
+  readelf -h "$bin" 2>/dev/null | grep -q "AArch64" || fail "android-engine: $bin is not AArch64"
+  readelf -p .interp "$bin" 2>/dev/null | grep -q "/system/bin/linker64" \
+    || fail "android-engine: $bin PT_INTERP is not /system/bin/linker64 (wrong GOOS? built linux?)"
+  if readelf -d "$bin" 2>/dev/null | grep -q "(NEEDED)"; then fail "android-engine: $bin has NEEDED libs (CGO leaked in)"; fi
+  ok "android-engine: $bin is a pure-Go bionic PIE (aarch64, linker64 interp, no NEEDED)"
+}
+
+cmd_apk(){
+  # Structural checks on the release APK. Signature + zipalign are verified by the
+  # assembler inside the Android toolchain image (apksigner lives there, not here).
+  apk=${1:?apk}; [ -f "$apk" ] || fail "no such apk: $apk"
+  command -v unzip >/dev/null 2>&1 || fail "apk: unzip unavailable"
+  listing=$(unzip -l "$apk") || fail "apk: not a readable zip"
+  echo "$listing" | grep -q "lib/arm64-v8a/liblodorsync.so" || fail "apk: engine binary missing from jniLibs"
+  echo "$listing" | grep -q "AndroidManifest.xml" || fail "apk: no AndroidManifest.xml"
+  echo "$listing" | grep -q "classes.dex" || fail "apk: no classes.dex"
+  # BIOS gate (BYOB-via-RomM policy): nothing BIOS-shaped may ride in the APK.
+  if echo "$listing" | grep -iE "bios|scph[0-9]|\.srm$|_boot\.rom" >/dev/null; then
+    fail "apk: BIOS/firmware-shaped entry found — never ship BIOS"
+  fi
+  ok "apk: $apk carries the engine, no BIOS-shaped payloads"
+}
+
 cmd_elf(){
   bin=${1:?bin}; shift; [ -f "$bin" ] || fail "no such binary: $bin"
   command -v readelf >/dev/null 2>&1 || fail "elf: readelf unavailable — cannot verify $bin (run inside the golang image)"
@@ -193,6 +224,11 @@ $bios"
 PRIVATE hostname/tailnet leak:
 $leak"
   else
+    # Strict mode (private-mono callers export LODOR_PII_REQUIRED=1): missing terms file is a HARD
+    # FAIL -- an internal publish must not silently skip the private-hostname leak scan.
+    if [ "${LODOR_PII_REQUIRED:-0}" = 1 ]; then
+      fail "redistributable: LODOR_PII_REQUIRED=1 but $ROOT/.pii-terms.conf is missing (strict private-mono publish must not skip host-leak scan)"
+    fi
     echo "  SKIP private-host scan: no $ROOT/.pii-terms.conf (internal-only; not an error on public checkouts)"
   fi
   if [ -n "$bad" ]; then printf '%b\n' "$bad" >&2; fail "redistributable gate: tree contains non-publishable content (see above)"; fi
@@ -221,7 +257,13 @@ cmd_agent_pii(){
   # Term list lives OUTSIDE the repo tree that release/graft-lodoros.sh publishes ($ROOT/.pii-terms.conf,
   # one extended-regex alternation on line 1) — baking the list here would itself ship the very strings
   # this gate exists to block. No terms file => skip LOUDLY (public checkouts cannot and need not run this).
-  if [ ! -f "$ROOT/.pii-terms.conf" ]; then echo "  SKIP agent-pii: no $ROOT/.pii-terms.conf (internal-only gate; not an error on public checkouts)"; return 0; fi
+  if [ ! -f "$ROOT/.pii-terms.conf" ]; then
+    # Strict mode (private-mono callers export LODOR_PII_REQUIRED=1): a missing terms file is a
+    # HARD FAIL -- an internal publish must never silently skip the PII scan. Public checkouts
+    # (no env, no terms file) skip loudly, as before.
+    [ "${LODOR_PII_REQUIRED:-0}" = 1 ] && fail "agent-pii: LODOR_PII_REQUIRED=1 but $ROOT/.pii-terms.conf is missing (strict private-mono publish must not skip PII scan)"
+    echo "  SKIP agent-pii: no $ROOT/.pii-terms.conf (internal-only gate; not an error on public checkouts)"; return 0
+  fi
   pat=$(head -n1 "$ROOT/.pii-terms.conf")
   [ -n "$pat" ] || fail "agent-pii: $ROOT/.pii-terms.conf is empty"
   hits=$(grep -rlwiIE "$pat" "$d" 2>/dev/null || true)
@@ -280,10 +322,60 @@ print(f"  ok: update-manifest: schema 1, {seen} asset(s) well-formed" + (f", pin
 PY
 }
 
+# secrets: scan a shippable tree for LEAKED CREDENTIAL VALUES (not just filenames -- a token
+# pasted into a script/config/log ships the secret even if the file is innocuously named). Fail
+# CLOSED. grep -rlIE: recurse, list matching files, skip binary (-I), extended regex. Each pattern
+# is scanned independently so a hit is attributable. Placeholders (example / paste-your / changeme)
+# are explicitly excluded on the generic-token pattern so normal pak template text does not trip it.
+# Patterns:
+#   ghp_<36>                     GitHub classic PAT
+#   github_pat_<50+>             GitHub fine-grained PAT
+#   tskey-<...>                  Tailscale auth key
+#   xox[baprs]-...               Slack token
+#   -----BEGIN ... PRIVATE KEY   PEM private key
+#   AKIA<16>                     AWS access key id
+#   authorization: bearer <...>  (case-insensitive) Authorization: Bearer header value
+#   "token":"<16+>"              high-entropy JSON token literal, placeholders excluded
+cmd_secrets() {
+  d=${1:?usage: gate.sh secrets <dir>}
+  [ -d "$d" ] || fail "secrets: no such dir: $d"
+  hits=""
+  scan() { # scan <label> <grep-flags> <ERE>
+    _lbl=$1; _fl=$2; _re=$3
+    _h=$(grep -rlI $_fl -E "$_re" "$d" 2>/dev/null || true)
+    [ -z "$_h" ] || hits="$hits
+[$_lbl]
+$_h"
+  }
+  scan "github-classic-pat"   ""   'ghp_[0-9A-Za-z]{36}'
+  scan "github-fine-pat"      ""   'github_pat_[0-9A-Za-z_]{50,}'
+  scan "tailscale-authkey"    ""   'tskey-[0-9A-Za-z-]+'
+  scan "slack-token"          ""   'xox[baprs]-'
+  scan "pem-private-key"      ""   '-----BEGIN [A-Z ]*PRIVATE KEY-----'
+  scan "aws-access-key"       ""   'AKIA[0-9A-Z]{16}'
+  # bearer: only flag token-shaped values (>=20 token chars) — '<token>'-style doc placeholders are fine
+  scan "authorization-bearer" "-i" 'authorization:[[:space:]]*bearer[[:space:]]+[A-Za-z0-9._~+/=-]{20,}'
+  # high-entropy "token":"..." literal, but NOT a placeholder. Do the exclusion in a second pass:
+  # keep only files that carry a token literal whose VALUE is not an obvious placeholder.
+  _tokfiles=$(grep -rlIE '"token"[[:space:]]*:[[:space:]]*"[^"]{16,}"' "$d" 2>/dev/null || true)
+  for _f in $_tokfiles; do
+    if grep -oIE '"token"[[:space:]]*:[[:space:]]*"[^"]{16,}"' "$_f" 2>/dev/null \
+        | grep -viE 'example|paste|changeme|goes-here|-here|_here|placeholder|your-token|<[^>]*>' >/dev/null 2>&1; then
+      hits="$hits
+[json-token-literal]
+$_f"
+    fi
+  done
+  if [ -n "$hits" ]; then printf '%s\n' "$hits" >&2; fail "secrets: leaked credential value(s) in shipped tree under $d (files above)"; fi
+  ok "secrets: no leaked credential values under $d"
+}
+
 case "${1:-}" in
   contract) cmd_contract;;
   branding) shift; cmd_branding "$@";;
   static-go) shift; cmd_static_go "$@";;
+  android-engine) shift; cmd_android_engine "$@";;
+  apk) shift; cmd_apk "$@";;
   elf) shift; cmd_elf "$@";;
   wifi-coverage) shift; cmd_wifi_coverage "$@";;
   no-legacy) shift; cmd_no_legacy "$@";;
@@ -293,5 +385,6 @@ case "${1:-}" in
   agent-pii) shift; cmd_agent_pii "$@";;
   store-version) shift; cmd_store_version "$@";;
   update-manifest) shift; cmd_update_manifest "$@";;
-  *) echo "usage: gate.sh {contract|branding <dir>|static-go <bin>|elf <bin> [--max-glibc X.Y] [--symbol SYM]...|wifi-coverage <card-root> [platforms]|no-legacy <dir>|shim-coverage <card-root> [platforms]|redistributable <dir>|cruft <dir>|agent-pii <dir>|store-version <new> <published>}"; exit 2;;
+  secrets) shift; cmd_secrets "$@";;
+  *) echo "usage: gate.sh {contract|branding <dir>|static-go <bin>|elf <bin> [--max-glibc X.Y] [--symbol SYM]...|wifi-coverage <card-root> [platforms]|no-legacy <dir>|shim-coverage <card-root> [platforms]|redistributable <dir>|cruft <dir>|agent-pii <dir>|store-version <new> <published>|secrets <dir>}"; exit 2;;
 esac

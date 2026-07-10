@@ -47,9 +47,11 @@ if [ -f "$PIDFILE" ]; then
 fi
 echo "$$" > "$PIDFILE"
 
-# On any exit: drop the WiFi lock (NEVER power the radio down) and clear our pidfile.
-# wifi_release is owner-scoped, so it no-ops unless we currently hold the lock.
-trap 'wifi_release; rm -f "$PIDFILE" 2>/dev/null' EXIT INT TERM HUP QUIT
+# On any exit: drop the WiFi lock (NEVER power the radio down), clear our pidfile, and
+# remove the cover-cancel sentinel (#26) so a cancel that stopped us can't linger and
+# pre-abort a later cover fetch. wifi_release is owner-scoped, so it no-ops unless we
+# currently hold the lock.
+trap 'wifi_release; rm -f "$PIDFILE" /tmp/lodor-cover-cancel 2>/dev/null' EXIT INT TERM HUP QUIT
 
 creds_present || { log "no creds; exit"; exit 0; }
 [ -x "$BIN" ]  || { log "engine binary missing: $BIN"; write_status error; exit 1; }

@@ -109,17 +109,24 @@ while :; do
 		set_clock || log "clock set failed"
 		if [ "$mode" = full ]; then
 			run_sync >> "$LOG" 2>&1; rc=$?
+			# Save-STATES (task: los-statesync): the bare run_sync flushes pending SAVES but
+			# not STATES — drain the offline state queue on the same warm link before releasing.
+			# Best-effort: a state-drain failure never demotes the full-sync result.
+			run_sync --push-pending-states >> "$LOG" 2>&1 || true
 			wifi_release
 			if [ "$rc" -eq 0 ]; then
 				date +%s > "$LAST_FULL"   # shared: a real full sync happened (shim reads this)
-				log "sync ok"
+				log "sync ok (saves + states drained)"
 			else
 				log "sync rc=$rc (retry next interval)"
 			fi
 		else
 			run_sync --push-pending >> "$LOG" 2>&1; rc=$?
+			# Save-STATES (task: los-statesync): also drain any queued STATES on the off-charge
+			# flush so a state made off-charge reaches RomM without waiting to plug in. Best-effort.
+			run_sync --push-pending-states >> "$LOG" 2>&1 || true
 			wifi_release
-			log "flush rc=$rc (off-charge pending-save push)"
+			log "flush rc=$rc (off-charge pending save + state push)"
 		fi
 	else
 		log "wifi up but no usable link; back off"   # acq=1

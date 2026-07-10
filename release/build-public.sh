@@ -25,6 +25,7 @@ SRC="${1:?usage: build-public.sh <SRC_TREE> <OUT_DIR> [VERSION]}"
 OUT="${2:?usage: build-public.sh <SRC_TREE> <OUT_DIR> [VERSION]}"
 VER="${3:-$(cat "$ROOT/VERSION" 2>/dev/null || echo 0.9.0)}"
 GATE="$ROOT/release/gate.sh"
+export LODOR_PII_REQUIRED=1   # private-mono caller: PII/branding gates must NOT fail open
 NOTES_SRC="$ROOT/release/release-notes.md"
 
 [ -d "$SRC" ] || { echo "FATAL: SRC tree not found: $SRC" >&2; exit 2; }
@@ -41,8 +42,18 @@ find "$STAGE" -name "_LODOROS-PROVENANCE.txt" -exec grep -liE \
 find "$STAGE" -type f \( -name drastic -o -name drastic64 \) 2>/dev/null \
   | while read -r b; do d="$(dirname "$b")"; echo "   - ${d#"$STAGE"/} (drastic binary)"; rm -rf "$d"; done || true
 
-echo ">> strip: bundled config.json (private hostname/token) + wifi.txt"
-find "$STAGE" -path "*/Lodor.pak/config.json" -delete 2>/dev/null || true
+echo ">> strip: device state + credential-bearing files (private hostname/token, wifi creds, logs)"
+# Delete anything that can carry a live secret or private state. PRESERVE *.example (placeholder
+# templates are the onboarding docs). config.json (private hostname/token), settings.conf, logs,
+# and every *.token / *-token / .romm-token (RomM keychain material) must never ship.
+find "$STAGE" \( \
+     -name "config.json" \
+  -o -name "settings.conf" \
+  -o -name "*.log" \
+  -o -name "*.token" \
+  -o -name "*-token" \
+  -o -name ".romm-token" \
+  \) ! -name "*.example" -type f -delete 2>/dev/null || true
 find "$STAGE" -name "wifi.txt" -delete 2>/dev/null || true
 
 echo ">> strip: TrimUI (tg5040/zero28/trimuismart) + magicmini"
@@ -53,7 +64,7 @@ done
 
 if [ "${LODOR_BUILD_NONMIYOO:-0}" != 1 ]; then
   echo ">> strip: non-Miyoo platforms (Miyoo-only fleet, pivot 2026-07-05)"
-  for p in rg35xxplus rgb30 gkdpixel m17 rg35xx tg3040 rg40xxcube; do
+  for p in rg35xxplus rgb30 gkdpixel m17 rg35xx tg3040 rg40xxcube zero28 magicmini trimuismart; do
     rm -rf "$STAGE/.system/$p" "$STAGE/Emus/$p" "$STAGE/Tools/$p" "$STAGE/.userdata/$p" 2>/dev/null || true
   done
   # top-level installer bootstraps for dropped families (keep miyoo285/miyoo354)
@@ -77,6 +88,8 @@ echo ">> regenerate SHA256SUMS.txt"
   find . -type f ! -name SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS.txt )
 
 echo ">> GATES (hard-fail)"
+# secrets FIRST: a leaked credential value is the highest-severity fail (fails closed).
+sh "$GATE" secrets         "$STAGE"
 sh "$GATE" redistributable "$STAGE"
 sh "$GATE" no-legacy       "$STAGE"
 sh "$GATE" branding        "$STAGE"

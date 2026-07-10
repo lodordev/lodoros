@@ -1,73 +1,78 @@
 # LodorOS
 
-<p align="center">
-  <img src="docs/screenshots/cleaned/lodor-library.jpg" width="66%" alt="LodorOS running on a handheld">
-</p>
+A self-hosted, RomM-backed console OS for the **Miyoo Mini Flip**. LodorOS is a fork of
+[MinUI](https://github.com/shauninman/MinUI) that turns the Flip into a front-end for your own
+[RomM](https://github.com/rommapp/romm) server: your entire library shows up as zero-byte stubs,
+games download the moment you launch them, and saves sync back to the server around every session —
+all driven by the CGO-free [Lodor engine](https://github.com/lodordev/lodor).
 
-**Your self-hosted [RomM](https://romm.app) library, on your handheld.** LodorOS is a [MinUI](https://github.com/shauninman/MinUI) fork that turns a cheap retro handheld into a thin client for your own RomM game-library server: your whole collection shows up in the menu as lightweight stubs with box art, games download on demand, and saves sync both ways — automatically, around every play session.
+It's the flagship build of the Lodor project (the engine and its per-CFW ports live in separate
+repos).
 
-> **Beta.** LodorOS is a *client for your own RomM server* — not a plug-and-play "download games" OS. If you run (or want to run) RomM, this is for you.
+## What it does
 
-## Download & docs
-- ⬇️ **Releases:** https://github.com/lodordev/lodoros/releases
-- 📖 **Wiki / setup guide:** https://github.com/lodordev/lodoros/wiki
+- **Onboard to your server** — a native first-run wizard: Wi-Fi → server address → 8-digit RomM pair
+  code → device name. No admin credentials live on the device; a scoped client token is all it keeps.
+- **Transparent library** — every game in RomM appears as a stub. Tap one and the real ROM streams
+  down (with a native progress bar), verifies, and launches. Multi-disc PS1 is handled (per-disc fetch
+  + generated `.m3u`).
+- **Save sync** — saves push to RomM (additive, versioned) and the newest pulls back, with a pending
+  queue for writes made offline. A background daemon flushes that queue on its own — even off charge,
+  the moment there's something to upload — so progress reaches the server without a manual sync.
+- **Flashback** — every save you've made is a point on a per-game timeline. Scrub it and restore any
+  past point with one button, from the per-game menu *or* the in-game pause menu; restoring drops you
+  straight back into that moment. The current save is always preserved first, so a flashback can never
+  lose progress.
+- **Continue** — a cross-device "most recently played" tile at the top of the library: pick up the game
+  you last touched, on this device or another.
+- **Native menus** — library, collections, search, sync, Flashback, and per-game actions are rendered
+  natively in the launcher (no foreign UI toolkit).
 
-## Features
-- **Whole-library browsing, offline** — every game in RomM appears in the menu with box art, even with Wi-Fi off.
-- **Download-on-launch** — pick a game you don't have on the card; it downloads, hash-verifies, and boots.
-- **Two-way save sync** — saves pull before you play and push after you quit, to RomM. Restore older saves from the server.
-- **Private access** — reach your server over **Tailscale** or **Cloudflare Access** (service token), or plain **LAN**. RomM stays off the public internet.
-- **One download, whole fleet** — the same release boots every supported device.
-- Keeps MinUI's clean, fast, native look.
+## Layout
 
-## Supported devices
-Miyoo Mini Plus · Miyoo A30 · Miyoo Flip V2 · Anbernic H700 family (RG35XX Plus / H, RG34XX, RG28XX, RGcubeXX, RG40XX) · Powkiddy RGB30.
-TrimUI devices are served separately by the no-fork **Lodor-NextUI** tool.
+```
+launcher/
+  minui.c        LodorOS launcher — our fork of MinUI's minui.c (native menus, onboarding, sync UI)
+  minarch.c      our fork of MinUI's libretro frontend — adds in-game Flashback to the pause menu
+  makefile       built within MinUI's build system
+paks/
+  Lodor.pak/ the integration pak: Wi-Fi/clock/sync library, the minarch launch shim,
+                 the periodic sync daemon, install/uninstall, CA bundle
+  Emus/          expanded-system emulator paks (launch.sh + default.cfg + libretro core):
+                 Sega CD, FDS, SG-1000, Arcade/Neo Geo (FBN), WonderSwan/Color, Atari Lynx,
+                 32X, PC Engine, Master System, Game Gear, Virtual Boy, NGP/NGPC, Pokémon mini,
+                 PICO-8, Super Game Boy, and more — beyond MinUI's built-in core set.
+                 (FBN.pak ships its definition but NOT the FBNeo core — see CREDITS.)
+  Reset WiFi.pak, Reboot.pak, Toggle 560p.pak   Lodor utility paks
+  ADBD, Bootlogo, Clock, Files, IP, Input, Remove Loading, Wifi   bundled community/MinUI
+                 tool paks (their own LICENSE files included) — see CREDITS
+config.json.example   server + paired token (copied to the pak's config.json on device)
+wifi.txt.example      SD-root Wi-Fi credentials (Miyoo Mini colon format)
+```
 
-## Requirements
-- A self-hosted **RomM** server, **4.8.0 or newer** (the device-pairing API ships in 4.8.0 — older servers fail at pairing).
-- A supported device (see above).
-- **BYOB** — LodorOS never ships BIOS/firmware; supply your own for systems that need them.
+The sync **engine** (`lodor-sync`) is a build artifact of
+[lodordev/lodor](https://github.com/lodordev/lodor) and is **not** committed here — build it static for
+ARMv7 and place it in `Lodor.pak/`.
 
-## Screenshots
+## Build & install
 
-<p align="center">
-  <img src="docs/screenshots/screens/platforms.jpg" width="32%" alt="Your whole RomM library in the menu">
-  <img src="docs/screenshots/screens/search.jpg" width="32%" alt="Search the catalog">
-  <img src="docs/screenshots/screens/results.jpg" width="32%" alt="Search results">
-</p>
-<p align="center">
-  <img src="docs/screenshots/screens/welcome.jpg" width="32%" alt="First-run welcome">
-  <img src="docs/screenshots/screens/network.jpg" width="32%" alt="Choose how to reach RomM">
-  <img src="docs/screenshots/screens/pairing.jpg" width="32%" alt="Pair with your server">
-</p>
+- `launcher/minui.c` is built against MinUI's toolchain for the `miyoomini` platform (it replaces
+  MinUI's `minui.elf`).
+- Build the Lodor engine for ARMv7 and drop the binary into the pak; copy the pak under
+  `Tools/miyoomini/` on the card.
+- Boot, run the onboarding wizard, and your library mirrors in.
 
----
+## Status
 
-## For developers
+Built and daily-driven on the Miyoo Mini Flip. Onboarding, the stub-mirror library, fetch-on-launch
+(incl. multi-disc PS1), save sync, the Continue tile, background sync, the Wi-Fi keep-up + auto-recovery
+rearchitecture, and Flashback (both the library menu and the in-game pause menu) are verified on
+hardware. Known limitation: Flashback is currently **online** — its timeline is read from the server,
+so a save made offline becomes flashback-able only after it syncs up (an offline local cache is on the
+roadmap).
 
-This repository is the single source of truth for LodorOS and its companion integrations. It's structured so a change in one component can't silently break another before it reaches hardware.
+## License & credits
 
-### Layout
-| Dir | What |
-|---|---|
-| `engine/` | The LodorOS sync core (Go, CGO-free static; `armhf` + `arm64` cover every device). |
-| `lodoros/` | The forked MinUI launcher (C) and its paks — the native-menu LodorOS. |
-| `integrations/nextui/` | No-fork TrimUI/NextUI Tool-pak (shell) that drives the same engine. |
-| `integrations/` | Other no-fork host integrations (muOS, OnionOS). |
-| `contract/` | `config.schema.json` — the single definition of `config.json`, shared by the Go and C readers. |
-| `release/` | `release.sh` (build every platform from one commit), `gate.sh` (pre-flash checks). |
-
-### Build & release principles
-- **One release, all platforms.** `release.sh <commit>` builds every platform from one pinned commit and aborts on any missing or ungated artifact — no "works on one device, not another" from divergent source.
-- **Gate before flash.** `gate.sh` runs static ELF checks (interpreter/NEEDED/glibc-floor + required symbols) and a redistributability check, so a wrong-libc brick or a non-free/secret-bearing artifact never reaches a card.
-- **Config contract.** Any change to `contract/config.schema.json` bumps `schema_version` and updates every reader in the same commit; the contract gate runs first.
-
-### Building
-The engine is CGO-free Go (`GOARCH=arm GOARM=7` for armhf, `arm64` otherwise). The launcher builds per-platform against each device's toolchain. See `release/` for the pipeline.
-
-## License
-LodorOS's original code — the paks, the onboarding flow, and the sync engine — is released by **lodordev under the [MIT License](LICENSE)**. LodorOS is a fork of [MinUI](https://github.com/shauninman/MinUI), used and modified **with the author's permission**; files derived from MinUI (notably the launcher) remain subject to MinUI's terms and their original author's copyright. See [`LICENSE`](LICENSE) for the full statement.
-
-## Credits
-Built on **MinUI** (Shaun Inman). Save-sync lineage credits **[Grout](https://github.com/rommapp/grout)**. The H700 heavy-emulator approach credits **[ryanmsartor](https://github.com/ryanmsartor/RGXX-Custom-MinUI-Paks)**. Thanks to **RomM**, **Tailscale**, **Cloudflare**, and the retro-handheld community. See the wiki's [Credits](https://github.com/lodordev/lodoros/wiki/Credits) for the full list.
+LodorOS is a MinUI fork used with the author's permission; our additions are MIT. See
+[LICENSE](LICENSE) and [CREDITS.md](CREDITS.md). LodorOS ships **no** BIOS, firmware, or game
+content — you supply your own, on your own server.
