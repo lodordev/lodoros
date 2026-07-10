@@ -112,7 +112,16 @@ if [ -n "$ROM" ] && [ -x "$_LODOR_SYNC" ]; then
 			_bmsg="${_bsys:-This game} needs BIOS: ${_bmiss:-firmware}. Get it via Sync > Download BIOS, then relaunch."
 			echo "$(date +'%F %T') [shim] BIOS GATE: blocked launch — $_bmsg" >> "$SDCARD/Tools/$PLAT/Lodor.pak/session.log" 2>/dev/null
 			if [ -x "$SDCARD/.system/$PLAT/bin/say.elf" ]; then "$SDCARD/.system/$PLAT/bin/say.elf" "$_bmsg" >/dev/null 2>&1
-			elif command -v say.elf >/dev/null 2>&1; then say.elf "$_bmsg" >/dev/null 2>&1; fi
+			elif command -v say.elf >/dev/null 2>&1; then say.elf "$_bmsg" >/dev/null 2>&1
+			else echo "$(date +'%F %T') [shim] BIOS GATE: say.elf unavailable — reason recoverable via session.log + last-fail-reason.txt" >> "$SDCARD/Tools/$PLAT/Lodor.pak/session.log" 2>/dev/null; fi
+			# #13/#17: persist the reason where it survives the session — say.elf may be absent
+			# or unusable, and the message must still be recoverable afterwards. FAT32-atomic
+			# temp+mv; written inline because this shim deliberately never sources the lib (the
+			# launch path below is load-bearing).
+			_frf="$SDCARD/.userdata/shared/last-fail-reason.txt"
+			mkdir -p "$SDCARD/.userdata/shared" 2>/dev/null
+			{ printf '%s\n' "$_bmsg"; date +'%F %T'; } > "$_frf.tmp.$$" 2>/dev/null && mv -f "$_frf.tmp.$$" "$_frf" 2>/dev/null
+			rm -f "$_frf.tmp.$$" 2>/dev/null
 			exit 0
 			;;
 	esac

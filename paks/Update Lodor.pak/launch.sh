@@ -116,7 +116,8 @@ offer_reboot(){
 # Already staged from a prior run: don't re-download, just tell them (sticky) and offer a reboot.
 if [ -f "$LODOR/.update/READY" ]; then
 	_sv="$(get_setting update_staged)"; [ -n "$_sv" ] || _sv="An update"
-	offer_reboot "$_sv is downloaded and ready."
+	_sn="$(head -n1 "$LODOR/update-notes.txt" 2>/dev/null)"   # #8: replay the changelog with the reboot offer
+	offer_reboot "$_sv is downloaded and ready.${_sn:+ New: $_sn}"
 	exit 0
 fi
 
@@ -142,6 +143,42 @@ if [ "$(result_tok "$OUT" update)" != "1" ]; then
 	exit 0
 fi
 set_setting update_available "$LATEST"
+# #8: the engine emits a single-line changelog trailer (NOTES\t<line>) when the channel
+# carries notes. Capture it for the pre-download message and the reboot offer, and persist
+# it to its OWN file (temp+mv) so the already-staged path can replay it. NOT set_setting:
+# settings.conf is dot-SOURCED by the lib, so free text there would be EXECUTED as shell.
+_TAB="$(printf '\t')"
+NOTES="$(printf '%s\n' "$OUT" | sed -n "s/^NOTES${_TAB}//p" | head -1)"
+if [ -n "$NOTES" ]; then
+	printf '%s\n' "$NOTES" > "$LODOR/update-notes.txt.tmp.$$" 2>/dev/null \
+		&& mv -f "$LODOR/update-notes.txt.tmp.$$" "$LODOR/update-notes.txt" 2>/dev/null
+	rm -f "$LODOR/update-notes.txt.tmp.$$" 2>/dev/null
+fi
+
+# --- preflight (#9): card space + charge state, BEFORE any bytes move ---------------
+# The applier needs the zip AND the unpacked staged tree on the card at once (~2x the
+# download), so gate on a sane floor — --check-update doesn't expose the asset size.
+# Honest copy on ENOSPC; unparseable df output never blocks (we can't claim a problem we
+# didn't verify).
+UPDATE_SPACE_FLOOR_KB=102400   # 100 MB
+free_card_kb(){ df -k "$SDCARD" 2>/dev/null | tail -1 | awk '{print $(NF-2)}'; }
+_free_kb="$(free_card_kb)"
+case "$_free_kb" in ''|*[!0-9]*) _free_kb="" ;; esac
+if [ -n "$_free_kb" ] && [ "$_free_kb" -lt "$UPDATE_SPACE_FLOOR_KB" ]; then
+	_need_mb=$(( (UPDATE_SPACE_FLOOR_KB - _free_kb) / 1024 + 1 ))
+	log "preflight ENOSPC: free=${_free_kb}KB < floor=${UPDATE_SPACE_FLOOR_KB}KB"
+	ui_sticky "Not enough card space — free up ~${_need_mb} MB and retry."
+	exit 1
+fi
+# Charging (#9): warn but never hard-block (the user may know their battery better). Only
+# when the charge line is actually READABLE here (miyoomini AXP/gpio — what is_charging
+# reads); elsewhere we can't tell, and a false "not charging" tip would be a lie.
+if [ -x /customer/app/axp_test ] || [ -f /sys/devices/gpiochip0/gpio/gpio59/value ]; then
+	if ! is_charging; then
+		log "preflight: not charging — warned, continuing"
+		ui_flash "Tip: plug in before updating." 4
+	fi
+fi
 
 # --- download with a REAL, engine-driven progress bar ------------------------------
 # Run --fetch-update in the background and mirror the engine's HONEST side-channel to the
@@ -150,7 +187,9 @@ set_setting update_available "$LATEST"
 # the engine hasn't written a number yet we show its phase text only. (This is the same
 # bridge the NextUI pre-launch fetch hook uses, adapted to minui-presenter.)
 rm -f /tmp/dl-progress /tmp/romm-phase 2>/dev/null
-ui_hold "Downloading Lodor $LATEST..."
+# #8: the pre-download line carries the changelog — this is the consent moment for the bytes.
+ui_hold "Downloading Lodor $LATEST...${NOTES:+
+New: $NOTES}"
 ( LODOR_UPDATE_ASSET="lodoros-$PLAT" "$SYNC_BIN" --fetch-update >/tmp/upd-fetch-out 2>>"$LOG"; echo $? > /tmp/upd-fetch-rc ) &
 DLPID=$!
 _lastline=""
@@ -176,10 +215,20 @@ wifi_release
 case "$FRC" in
 	0)
 		set_setting update_staged "$LATEST"
-		offer_reboot "Downloaded Lodor $LATEST." ;;
+		offer_reboot "Downloaded Lodor $LATEST.${NOTES:+ New: $NOTES}" ;;
 	4)
 		ui_sticky "Download didn't verify — nothing changed. Try again." ;;
 	*)
-		ui_sticky "Download failed — check your connection and try again." ;;
+		# #9: a full card fails staging with the SAME engine rc (3) as a dead network — but
+		# the card itself tells the truth: the engine's ENOSPC stderr is in update.log and
+		# df shows the squeeze. Distinguish where detectable; honest generic copy otherwise.
+		_free_kb="$(free_card_kb)"
+		case "$_free_kb" in ''|*[!0-9]*) _free_kb="" ;; esac
+		if tail -4 "$LOG" 2>/dev/null | grep -qi "no space left" || { [ -n "$_free_kb" ] && [ "$_free_kb" -lt "$UPDATE_SPACE_FLOOR_KB" ]; }; then
+			_need_mb=$(( (UPDATE_SPACE_FLOOR_KB - ${_free_kb:-0}) / 1024 + 1 ))
+			ui_sticky "Download failed — not enough card space. Free up ~${_need_mb} MB and retry."
+		else
+			ui_sticky "Download failed — check your connection and try again."
+		fi ;;
 esac
 exit 0

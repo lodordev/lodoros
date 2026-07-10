@@ -29,8 +29,10 @@ if [ "$PHASE" = "report" ]; then
 	[ -n "$START" ] && [ -n "$END" ] || exit 0
 	if wifi_acquire push; then
 		set_clock >/dev/null 2>&1
-		# rc=2 = the engine does not implement --report-session (the clean-rewrite engine never
-		# carried this Mini-Flip-era flag; a usage dump otherwise spams the log). Quiet skip.
+		# rc=2 = the engine does not implement --report-session (an older on-card binary;
+		# a usage dump otherwise spams the log). Quiet skip. The current engine's mode
+		# ALWAYS exits 0 (telemetry never blocks a quit), so rc here is 0/2/timeout-124
+		# only — never the >=3 fail-reason band run_sync persists for real sync modes.
 		run_sync --report-session "$ROM" --started "$START" --ended "$END" >> "$SESSION_LOG" 2>/dev/null
 		rc=$?
 		wifi_release

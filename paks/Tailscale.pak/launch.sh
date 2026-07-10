@@ -12,34 +12,40 @@ SDCARD="${SDCARD_PATH:-/mnt/SDCARD}"
 PLAT="${PLATFORM:-rg35xxplus}"
 LODOR_PAK="$SDCARD/Tools/$PLAT/Lodor.pak"
 
-# Only the Tailscale-eligible platforms (mirrors _ts_capable) get this maintenance pak.
-# On the others it is a silent no-op — no presenter render (avoids the miyoomini/my282
-# framebuffer issue) and nothing to manage.
-case "$PLAT" in
-	my355|tg5040|rg35xxplus) : ;;
-	*) exit 0 ;;
-esac
-
 # Borrow minui-list / minui-presenter from the always-present Wi-Fi pak (per-platform bins).
 arch=arm; uname -m 2>/dev/null | grep -q 64 && arch=arm64
 export PATH="$SDCARD/Tools/$PLAT/Wifi.pak/bin/$PLAT:$SDCARD/Tools/$PLAT/Wifi.pak/bin/$arch:$PATH"
+have_ui() { command -v minui-list >/dev/null 2>&1 && command -v minui-presenter >/dev/null 2>&1; }
+say_msg() { minui-presenter --message "$1" --timeout "${2:-3}" 2>/dev/null; }
+
+# Only the Tailscale-eligible platforms (mirrors _ts_capable) get this maintenance pak. On
+# the others: say so in ONE line (#16) — minui-presenter is the proven on-screen path on
+# every LodorOS platform (Update Lodor.pak drives it on the miyoomini; the framebuffer
+# caveat in the lib is about say.elf) — and log it either way. Never a bare exit 0 with UI
+# available.
+case "$PLAT" in
+	my355|tg5040|rg35xxplus) : ;;
+	*)
+		echo "$(date +'%F %T') platform $PLAT is not Tailscale-eligible — nothing to manage"
+		have_ui && say_msg "Tailscale isn't available on this device." 4
+		exit 0 ;;
+esac
 
 # tailscale-lib.sh keys off ROMM_PAK_DIR / SDCARD / PLAT.
 ROMM_PAK_DIR="$LODOR_PAK"; export ROMM_PAK_DIR SDCARD PLAT
 . "$LODOR_PAK/lib/romm-sync-lib.sh" 2>/dev/null
 . "$LODOR_PAK/lib/tailscale-lib.sh" 2>/dev/null
 
-have_ui() { command -v minui-list >/dev/null 2>&1 && command -v minui-presenter >/dev/null 2>&1; }
-say_msg() { minui-presenter --message "$1" --timeout "${2:-3}" 2>/dev/null; }
-
 # Not a Tailscale build (or lib missing) -> say so and leave.
 if ! command -v tailscale_status >/dev/null 2>&1; then
 	have_ui && say_msg "Tailscale is not available on this device." 4
 	exit 0
 fi
-# No on-screen UI available -> do the safe headless default so the pak still helps.
+# No on-screen UI available -> NO-OP (#10). This used to run ts_reset, wiping a healthy
+# node's saved sign-in just because the menu binaries were missing — destructive by
+# default. Recovery actions now require the menu; headless we only log and leave.
 if ! have_ui; then
-	ts_reset 2>/dev/null
+	echo "$(date +'%F %T') no UI (minui-list/minui-presenter missing) — no action taken; ts_reset NOT run"
 	exit 0
 fi
 

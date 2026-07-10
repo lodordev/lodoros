@@ -370,6 +370,22 @@ $_f"
   ok "secrets: no leaked credential values under $d"
 }
 
+
+# repo-parity: every public lane repo's latest release is the given version.
+# Unauthenticated (public repos); network required — run at the END of a publish.
+cmd_repo_parity(){
+  ver=${1:?usage: gate.sh repo-parity <version>}
+  bad=""
+  for r in lodor lodoros lodor-muos lodor-knulli lodor-nextui; do
+    tag=$(curl -sf "https://api.github.com/repos/lodordev/$r/releases/latest" \
+      | python3 -c "import json,sys;print(json.load(sys.stdin).get('tag_name',''))" 2>/dev/null || true)
+    want="v$ver"; [ "$r" = lodor-nextui ] && want="$ver"
+    [ "$tag" = "$want" ] || bad="$bad $r=${tag:-none}"
+  done
+  [ -z "$bad" ] || fail "repo-parity: lane repos not at $ver:$bad (run release/publish-lanes.sh)"
+  ok "repo-parity: all five lane repos at $ver"
+}
+
 case "${1:-}" in
   contract) cmd_contract;;
   branding) shift; cmd_branding "$@";;
@@ -386,5 +402,6 @@ case "${1:-}" in
   store-version) shift; cmd_store_version "$@";;
   update-manifest) shift; cmd_update_manifest "$@";;
   secrets) shift; cmd_secrets "$@";;
-  *) echo "usage: gate.sh {contract|branding <dir>|static-go <bin>|elf <bin> [--max-glibc X.Y] [--symbol SYM]...|wifi-coverage <card-root> [platforms]|no-legacy <dir>|shim-coverage <card-root> [platforms]|redistributable <dir>|cruft <dir>|agent-pii <dir>|store-version <new> <published>|secrets <dir>}"; exit 2;;
+  repo-parity) shift; cmd_repo_parity "$@";;
+  *) echo "usage: gate.sh {contract|branding <dir>|static-go <bin>|elf <bin> [--max-glibc X.Y] [--symbol SYM]...|wifi-coverage <card-root> [platforms]|no-legacy <dir>|shim-coverage <card-root> [platforms]|redistributable <dir>|cruft <dir>|agent-pii <dir>|store-version <new> <published>|secrets <dir>|repo-parity <version>}"; exit 2;;
 esac

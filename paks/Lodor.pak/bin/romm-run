@@ -65,6 +65,11 @@ esac
 
 [ -x "$BIN" ] || { log "FATAL: binary missing/not-exec: $BIN"; exit 3; }
 rm -f /tmp/dl-progress 2>/dev/null
+# Launcher Wi-Fi-reset gate sentinel (#2): minui reads /tmp/romm-wifi-fail after this wrapper
+# exits — first char '1' = Wi-Fi-plausible failure (offer the manual reset), '0'/absent =
+# clean success or a non-Wi-Fi failure (404s etc). Clear any stale verdict before this op
+# starts so a previous failure can never trigger the offer for a run that didn't earn it.
+rm -f /tmp/romm-wifi-fail 2>/dev/null
 
 # Bring Wi-Fi up via the §1 HONEST verified path. wifi_acquire owns /tmp/romm-phase: it writes the
 # verbose verified status (Powering radio / Connecting to <SSID> / Associated / Got IP / Online) and,
@@ -72,6 +77,10 @@ rm -f /tmp/dl-progress 2>/dev/null
 if ! wifi_acquire fg; then
 	log "wifi_acquire FAILED (no usable link) -> exit 2"
 	# Leave wifi_acquire's honest failure line standing (e.g. "Couldn't connect to <SSID>").
+	# Wi-Fi-class by definition: arm the launcher's reset offer (#2) and persist the honest
+	# reason (#17) so a later "Download failed" is diagnosable after the overlay is gone.
+	echo "1 wifi-acquire-failed" > /tmp/romm-wifi-fail 2>/dev/null
+	command -v lodor_persist_fail_reason >/dev/null 2>&1 && lodor_persist_fail_reason "Wi-Fi didn't come up"
 	exit 2
 fi
 log "wifi_acquire OK (host=$ROMM_HOST)"
@@ -143,5 +152,22 @@ esac
 # in the wrong file; mirror it explicitly to the file the launcher reads.
 [ "$1" = "--sync-feed" ] && printf '%s\n' "$out" > /tmp/lodor-feed.txt 2>/dev/null
 log "binary exit rc=$rc"
+# Verdict for the launcher's reset gate (#2) + failure-reason persistence (#17). rc 3 = the
+# engine could not reach the server — Wi-Fi-plausible on this radio, offer the reset.
+# Everything else is NOT a radio problem: 0 = ok, 4 = per-item errors (404s), 2 = config/
+# flag — write '0' so the launcher never offers a pointless reset.
+case "$rc" in
+	3)
+		echo "1 engine-unreachable" > /tmp/romm-wifi-fail 2>/dev/null
+		command -v lodor_persist_fail_reason >/dev/null 2>&1 && lodor_persist_fail_reason "Server unreachable (engine rc=3)"
+		;;
+	0)
+		echo "0" > /tmp/romm-wifi-fail 2>/dev/null
+		;;
+	*)
+		echo "0" > /tmp/romm-wifi-fail 2>/dev/null
+		command -v lodor_persist_fail_reason >/dev/null 2>&1 && lodor_persist_fail_reason "Sync failed (engine rc=$rc)"
+		;;
+esac
 wifi_release
 exit $rc

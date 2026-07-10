@@ -1043,6 +1043,25 @@ lodor_tier1_up() {
 	return 0
 }
 
+# --- last-failure reason persistence (#17) ------------------------------------
+# /tmp/romm-phase carries the HONEST final status line, but /tmp dies with the overlay /
+# reboot — so the launcher's generic "Download failed" could never say WHY after the fact.
+# Persist the final phase line (+ timestamp on line 2) to a card file a future launcher
+# build (or a human with the card) can read. ADDITIVE: no current binary reads it, no
+# behavior changes; the write is FAT32-atomic (temp+mv, the same pattern as every other
+# card write in this file).
+LODOR_FAIL_REASON_FILE="${LODOR_FAIL_REASON_FILE:-$SDCARD/.userdata/shared/last-fail-reason.txt}"
+lodor_persist_fail_reason() {
+	# $1 = fallback wording when /tmp/romm-phase is empty/missing
+	_fr="$(head -n1 /tmp/romm-phase 2>/dev/null)"
+	[ -n "$_fr" ] || _fr="${1:-unknown failure}"
+	mkdir -p "$(dirname "$LODOR_FAIL_REASON_FILE")" 2>/dev/null
+	{ printf '%s\n' "$_fr"; date +'%F %T'; } > "$LODOR_FAIL_REASON_FILE.tmp.$$" 2>/dev/null \
+		&& mv -f "$LODOR_FAIL_REASON_FILE.tmp.$$" "$LODOR_FAIL_REASON_FILE" 2>/dev/null
+	rm -f "$LODOR_FAIL_REASON_FILE.tmp.$$" 2>/dev/null
+	return 0
+}
+
 # --- run the sync binary -----------------------------------------------------
 # Runs from the Lodor pak so the engine reads config.json (CWD-relative). The Lodor engine is a
 # STATIC, CGO-free, SDL-free binary: it needs no shared libs. CFW=MinUI is required (the engine's
@@ -1116,7 +1135,14 @@ run_sync() {
 	  # on FAT32 (matches the temp+mv pattern used for every other card write in this file).
 	  [ -n "$_recent_out" ] && printf '%s\n' "$_recent_out" > "$ROMM_PAK_DIR/recent.txt.tmp.$$" && mv -f "$ROMM_PAK_DIR/recent.txt.tmp.$$" "$ROMM_PAK_DIR/recent.txt"
 	  exit $worst
-	)
+	); _rs_rc=$?
+	# #17: persist the final honest phase line when the engine failed for network/error
+	# reasons (rc>=3: 3 = unreachable, 4 = per-item errors) so the launcher's generic
+	# "Download failed" has a recoverable WHY after /tmp is gone. rc 2 is deliberately
+	# excluded: the benign --report-session probe returns 2 on engines without that flag
+	# (i.e. on every game quit) and would spam a misleading reason.
+	[ "$_rs_rc" -ge 3 ] && lodor_persist_fail_reason "sync failed (engine rc=$_rs_rc)"
+	return $_rs_rc
 }
 
 # --- gates -------------------------------------------------------------------

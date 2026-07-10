@@ -19,6 +19,19 @@ hash(){ sha256sum "$1" | cut -d" " -f1; }
 echo "== Lodor release @ $SHA =="
 sh "$GATE" contract || fail "config contract gate failed"
 
+# Branch-debt notice (2026-07-10, non-fatal): every release surfaces unmerged branches
+# with recent commits so staged work can't silently rot (the engine-romm-align lesson).
+echo ">> branch debt (unmerged, tips <45d, non-archive):" >&2
+_cutoff=$(( $(date +%s) - 45*86400 ))
+git -C "$ROOT" for-each-ref refs/heads refs/remotes/origin --format='%(refname:short) %(committerdate:unix)' \
+  | grep -v -E '^(origin/)?(main|HEAD)( |$)' | grep -v -E '^(origin/)?archive/' \
+  | while read -r _ref _ts; do
+      [ "$_ts" -lt "$_cutoff" ] && continue
+      git -C "$ROOT" merge-base --is-ancestor "$_ref" origin/main 2>/dev/null && continue
+      echo "   UNMERGED: ${_ref#origin/}" >&2
+    done | sort -u >&2 || true
+
+
 # Version is read BEFORE the engine builds so every binary carries it (ldflags -X into
 # lodor/buildinfo.Version — the self-update compare + --version contract). An unstamped
 # binary says "dev" and refuses to offer updates, so a missing VERSION here fails loud.
