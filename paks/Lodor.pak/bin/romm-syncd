@@ -166,6 +166,15 @@ while :; do
 			# not STATES — drain the offline state queue on the same warm link before releasing.
 			# Best-effort: a state-drain failure never demotes the full-sync result.
 			run_sync --push-pending-states >> "$LOG" 2>&1 || true
+			# Multi-disc prefetch (lodor#7 hybrid): after the pending queues drain, quietly
+			# complete any downloaded multi-disc game still missing discs on the SAME warm
+			# link (launches fetch disc-1-first; this is what makes mid-game disc swaps work
+			# without a relaunch). Charging-gated by being inside the full cycle. Best-effort,
+			# quietly logged. Knob: settings.conf prefetch_discs=off disables (default ON —
+			# the lib already sourced settings.conf).
+			if [ "${prefetch_discs:-on}" != "off" ]; then
+				run_sync --prefetch-discs >> "$LOG" 2>&1 || log "prefetch-discs rc=$? (retry next interval)"
+			fi
 			wifi_release
 			if [ "$rc" -eq 0 ]; then
 				date +%s > "$LAST_FULL"   # shared: a real full sync happened (shim reads this)

@@ -34,14 +34,17 @@ trap 'rm -f "$INGAME_LOCK" "$GAME_ACTIVE" 2>/dev/null' EXIT INT TERM HUP QUIT
 # silent by design (the on-screen flow lives in the launcher). If the download fails, do NOT launch an
 # empty ROM — clear the lock and exit to menu.
 #
-# MULTI-DISC (task #49/#74): a multi-disc game launches as its .m3u playlist, OR — when
-# minui's getFirstDisc found disc 1 on the card — as a disc file inside "<Game>/". Its
-# .m3u can be a REAL 183-byte playlist while the referenced discs are ABSENT (evicted, or
-# never downloaded). Handing that to pcsx is a black screen (Could't open '…Disc 1.chd').
-# So resolve the .m3u for whatever $ROM we got, and if ANY referenced disc is missing/empty,
-# --download the whole rom (engine fetches every disc + rewrites the .m3u) BEFORE launching.
-# --download on the .m3u path resolves the folder-rom id and is idempotent (skips verified
-# discs), so this is safe to run every launch. On failure, exit to menu — never a black screen.
+# MULTI-DISC (task #49/#74; DISC-1-FIRST per lodor#7): a multi-disc game launches as its
+# .m3u playlist, OR — when minui's getFirstDisc found disc 1 on the card — as a disc file
+# inside "<Game>/". The engine now downloads DISC-1-FIRST: a --download on the .m3u stub
+# fetches only the first missing disc, writes the FULL .m3u, and leaves later discs as
+# 0-byte stubs. So a REAL .m3u with missing/0-byte discs is a VALID state, not corruption:
+# each launch fetches the NEXT missing disc (--fetch-next-disc, idempotent, skips verified
+# discs) and the daemon prefetch completes the set in the background. The launch gate is
+# the FIRST disc only — that's what pcsx boots; handing it a missing disc 1 is a black
+# screen (Could't open '…Disc 1.chd'), while stub LATER discs are the designed shape
+# (swap = exit → relaunch until the set completes). On a still-missing disc 1, exit to
+# menu — never a black screen, never a harder gate than the game actually needs.
 
 # Resolve the playlist path for the passed ROM: the .m3u itself, or the sibling
 # "<Game>.m3u" beside the "<Game>/" folder a disc file lives in. Empty = not multi-disc.
@@ -72,25 +75,52 @@ _lodor_m3u_incomplete() {
 	return 1
 }
 
+# Return 0 (true) if the .m3u's FIRST listed disc is missing or 0-byte (the launch gate:
+# disc 1 is what the emulator boots; stub later discs are fine). An entry-less playlist
+# is broken -> also "first missing" (honest no-launch, same as before lodor#7).
+_lodor_m3u_first_missing() {
+	_m="$1"; [ -f "$_m" ] || return 0
+	_dir=$(dirname "$_m")
+	while IFS= read -r _line || [ -n "$_line" ]; do
+		[ -n "$_line" ] || continue
+		case "$_line" in
+			/*) _dp="$_line" ;;
+			*)  _dp="$_dir/$_line" ;;
+		esac
+		[ -s "$_dp" ] && return 1    # first listed disc present -> launchable
+		return 0
+	done < "$_m"
+	return 0                          # no entries -> broken -> treat as missing
+}
+
 ROMM_RUN="$SDCARD/Tools/$PLAT/Lodor.pak/bin/romm-run"
+_LODOR_STUB_FILLED=0
 if [ -f "$ROM" ] && [ ! -s "$ROM" ]; then
-	# 0-byte single-file cloud stub (or a 0-byte .m3u stub) — fill it in place.
+	# 0-byte single-file cloud stub (or a 0-byte .m3u stub) — fill it in place. For a
+	# multi-disc game this lands DISC 1 ONLY + the full .m3u (disc-1-first, lodor#7).
 	[ -x "$ROMM_RUN" ] && "$ROMM_RUN" --download "$ROM" >/dev/null 2>&1
 	if [ ! -s "$ROM" ]; then
 		rm -f "$INGAME_LOCK" 2>/dev/null
 		exit 0   # download failed/declined — nothing to launch
 	fi
+	_LODOR_STUB_FILLED=1
 fi
-# Real .m3u (or a disc beside one) with missing discs — fetch the whole rom first.
+# Real .m3u (or a disc beside one) with an incomplete disc set — fetch the NEXT missing
+# disc before launching (the re-trigger the 0-byte-stub gate can't provide: a populated
+# .m3u isn't a stub, so without this discs 2+ would strand forever). Skipped right after
+# a stub fill (disc 1 just landed this launch — one disc per launch, that's the design;
+# the daemon prefetch completes the rest in the background).
 _LODOR_M3U=$(_lodor_m3u_for "$ROM")
-if [ -n "$_LODOR_M3U" ] && _lodor_m3u_incomplete "$_LODOR_M3U"; then
-	[ -x "$ROMM_RUN" ] && "$ROMM_RUN" --download "$_LODOR_M3U" >/dev/null 2>&1
-	if _lodor_m3u_incomplete "$_LODOR_M3U"; then
-		rm -f "$INGAME_LOCK" 2>/dev/null
-		exit 0   # discs still missing after download — do NOT launch a black screen
-	fi
-	# If minui passed the .m3u itself because disc 1 was absent, the emulator can now
-	# load it directly (pcsx/minarch resolve the playlist). $ROM stays as-is.
+if [ -n "$_LODOR_M3U" ] && [ -s "$_LODOR_M3U" ] && [ "$_LODOR_STUB_FILLED" != 1 ] && _lodor_m3u_incomplete "$_LODOR_M3U"; then
+	[ -x "$ROMM_RUN" ] && "$ROMM_RUN" --fetch-next-disc "$_LODOR_M3U" >/dev/null 2>&1
+fi
+# LAUNCH GATE — FIRST DISC ONLY (never harder than the game needs): if disc 1 is present
+# the game launches even when a later fetch failed (stub discs are the designed disc-1-
+# first shape); if disc 1 itself is still missing/0-byte, exit to menu honestly — never
+# hand pcsx a black screen.
+if [ -n "$_LODOR_M3U" ] && [ -s "$_LODOR_M3U" ] && _lodor_m3u_first_missing "$_LODOR_M3U"; then
+	rm -f "$INGAME_LOCK" 2>/dev/null
+	exit 0   # disc 1 still missing — do NOT launch a black screen
 fi
 
 # ── BIOS launch-gate (build #158) ─────────────────────────────────────────────────────────────

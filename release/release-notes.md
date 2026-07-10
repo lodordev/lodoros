@@ -1,10 +1,11 @@
-# LodorOS 0.9.7.8
+# LodorOS 0.9.7.9
 
-Fix release for the Miyoo Mini family, same-day from hardware testing.
+Multi-disc, done right — plus self-signed server support.
 
 ## What changed
-- **The updater is visible again on Miyoo Mini devices.** 0.9.7.7's new update screens could black out the display on the Mini Plus until a power cycle (the underlying update still worked). Update and Reset-WiFi screens now use the platform's safe renderer — status images plus a single press-A-to-close message — and can no longer wedge the screen.
-- **Staged updates now always apply.** Cards set up before mid-June could download updates that never installed at reboot (the boot hook was missing and nothing repaired it). The background sync service now repairs the hook automatically and applies any already-downloaded update in the same boot.
+- **Multi-disc games start after one disc.** Launching a multi-disc game now downloads only the disc you need and gets you playing; the rest arrive quietly in the background while the device charges. Reach a disc swap before it's fetched? Relaunch grabs the next disc. Games you never launch cost zero card space. (Previously a 4-disc game downloaded everything before you could start.)
+- **Self-signed HTTPS servers can now onboard from the device.** If your server's certificate can't be verified, the setup wizard says so plainly and offers "Trust this server" — only for your own server — instead of failing with a misleading error.
+- **The version on screen is now the version on the card.** Updates stamp the system version display, which previously showed the card's original version forever.
 
 ## Install / update
-Existing devices: **Update Lodor** (LodorOS) or the store update (NextUI/muOS/Knulli). If your Mini Plus shows a black screen when you open Update Lodor (the 0.9.7.7 bug this release fixes): wait ~30 seconds — the download completes behind the blank screen — then power off and on; the update installs at boot and the screens are fixed from then on.
+Existing devices: **Update Lodor** (LodorOS) or the store update (NextUI/muOS/Knulli). Config, saves, and ROMs are preserved.

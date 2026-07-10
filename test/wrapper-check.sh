@@ -232,16 +232,25 @@ EOF
 	restore_case missing ""                    "2026-07-03 10:00:00" 0
 fi
 
-# --- 4. MULTI-DISC DOWNLOAD-ON-LAUNCH TRACE (release-blocking FFVII black-screen fix) ---
-# The minarch-shim.sh pre-launch hook must never hand pcsx an .m3u whose discs are
-# missing. Trace three cases in a fake SDCARD with a PATH-independent fake romm-run
-# (--download) and a fake real emulator that LOGS the argv it was launched with:
-#   M1 real .m3u + all discs present -> NO --download, emulator launched directly.
-#   M2 real .m3u + discs MISSING      -> --download on the .m3u, then (discs now present)
-#                                        the real emulator IS launched.
-#   M3 real .m3u + discs missing + download FAILS to materialize -> NO launch, exit to
-#                                        menu (honest failure, never a black screen).
-say "[4/5] multi-disc download-on-launch trace"
+# --- 4. MULTI-DISC LAUNCH TRACE (lodor#7 disc-1-first + the FFVII black-screen gate) ---
+# The engine downloads multi-disc games DISC-1-FIRST: a populated .m3u with 0-byte
+# later discs is a VALID state. The shim must (a) re-trigger the fetch for that state
+# via --fetch-next-disc (a populated .m3u is not a 0-byte stub, so the stub gate can't),
+# (b) gate the launch on the FIRST disc only (pcsx boots disc 1; stub later discs are
+# the design), and (c) still never hand pcsx a missing disc 1 (the black-screen fix).
+# Fake romm-run implements the engine's disc-1-first semantics: --download on a 0-byte
+# .m3u stub writes the FULL playlist + disc 1 only; --fetch-next-disc materializes the
+# first missing disc (per $MD_DL_MODE succeed/fail).
+#   M1 real .m3u + all discs present    -> NO engine call, emulator launched directly.
+#   M2 real .m3u + all discs MISSING    -> --fetch-next-disc lands disc 1, launch (discs
+#                                          2/3 still stubs — first-disc gate only).
+#   M2b disc-1 PATH launch, disc 2/3 missing -> sibling .m3u resolved, --fetch-next-disc
+#                                          fired, launch proceeds.
+#   M3 all discs missing + fetch FAILS  -> NO launch (honest exit, never a black screen).
+#   M4 disc 1 present + fetch FAILS     -> LAUNCH anyway (never gate harder than disc 1).
+#   M5 0-byte .m3u stub                 -> --download (disc-1-first fill), NO same-launch
+#                                          --fetch-next-disc (one disc per launch), launch.
+say "[4/5] multi-disc launch trace (disc-1-first)"
 
 SHIM="$LODOROS/paks/Lodor.pak/bin/minarch-shim.sh"
 
@@ -270,18 +279,28 @@ exit 0
 EOF
 	chmod +x "$MDSYS/minarch.real.elf"
 
-	# fake romm-run: logs the --download call and, per \$MD_DL_MODE, either
-	# materializes the 3 discs (succeed) or does nothing (fail).
+	# fake romm-run: logs every call; implements the engine's DISC-1-FIRST semantics per
+	# \$MD_DL_MODE (succeed/fail): --download on the .m3u stub writes the FULL playlist +
+	# disc 1 only; --fetch-next-disc materializes the FIRST missing disc.
 	cat > "$MDPAK/bin/romm-run" <<EOF
 #!/bin/sh
 echo "romm-run \$*" >> "$MDTRACE"
+[ "\${MD_DL_MODE:-fail}" = "succeed" ] || exit 4
 case "\$1" in
 	--download)
-		if [ "\${MD_DL_MODE:-fail}" = "succeed" ]; then
-			for d in 1 2 3; do
-				echo chd-bytes > "$MDGAME/Final Fantasy VII (USA) (Disc \$d).chd"
-			done
-		fi
+		printf '%s\n%s\n%s\n' \
+			"Final Fantasy VII (USA)/Final Fantasy VII (USA) (Disc 1).chd" \
+			"Final Fantasy VII (USA)/Final Fantasy VII (USA) (Disc 2).chd" \
+			"Final Fantasy VII (USA)/Final Fantasy VII (USA) (Disc 3).chd" \
+			> "$MDROM/Final Fantasy VII (USA).m3u"
+		echo chd-bytes > "$MDGAME/Final Fantasy VII (USA) (Disc 1).chd"
+		for d in 2 3; do : > "$MDGAME/Final Fantasy VII (USA) (Disc \$d).chd"; done
+		;;
+	--fetch-next-disc)
+		for d in 1 2 3; do
+			_dp="$MDGAME/Final Fantasy VII (USA) (Disc \$d).chd"
+			if [ ! -s "\$_dp" ]; then echo chd-bytes > "\$_dp"; break; fi
+		done
 		;;
 esac
 exit 0
@@ -296,32 +315,51 @@ run_shim() {
 		sh "$SHIM" "core.so" "$2" >/dev/null 2>&1
 }
 
-# M1: all discs present -> direct launch, no --download.
+# M1: all discs present -> direct launch, no engine call at all.
 build_md_sandbox 1
 for d in 1 2 3; do echo chd-bytes > "$MDGAME/Final Fantasy VII (USA) (Disc $d).chd"; done
 run_shim succeed "$MDROM/Final Fantasy VII (USA).m3u"
-grep -q 'romm-run --download' "$MDTRACE" && fail "M1: --download ran for a complete game" || pass "M1: no download when all discs present"
+grep -q 'romm-run --' "$MDTRACE" && fail "M1: engine called for a complete game" || pass "M1: no engine call when all discs present"
 grep -q '^LAUNCHED ' "$MDTRACE" && pass "M1: emulator launched directly" || fail "M1: emulator not launched"
 
-# M2: discs missing, download SUCCEEDS -> --download fired, then launch.
+# M2: real .m3u, all discs missing, fetch SUCCEEDS -> --fetch-next-disc lands disc 1,
+# launch proceeds with discs 2/3 still absent (the first-disc gate).
 build_md_sandbox 2
 run_shim succeed "$MDROM/Final Fantasy VII (USA).m3u"
-grep -q 'romm-run --download' "$MDTRACE" && pass "M2: download triggered for missing discs" || fail "M2: no download for missing discs"
-grep -q '^LAUNCHED ' "$MDTRACE" && pass "M2: emulator launched after discs landed" || fail "M2: emulator not launched after download"
+grep -q 'romm-run --fetch-next-disc' "$MDTRACE" && pass "M2: next-disc fetch triggered for incomplete set" || fail "M2: no next-disc fetch for incomplete set"
+grep -q '^LAUNCHED ' "$MDTRACE" && pass "M2: emulator launched with disc 1 present" || fail "M2: emulator not launched after disc 1 landed"
+[ -s "$MDGAME/Final Fantasy VII (USA) (Disc 2).chd" ] && fail "M2: disc 2 fetched same-launch (should be one disc per launch)" || pass "M2: later discs untouched (disc-1-first)"
 
 # M2b: minui passed disc 1's PATH (disc 1 present) but disc 2/3 missing -> the shim
-# resolves the sibling .m3u and still downloads before launch.
+# resolves the sibling .m3u and fetches the next missing disc before launch.
 build_md_sandbox 2b
 echo chd-bytes > "$MDGAME/Final Fantasy VII (USA) (Disc 1).chd"
 run_shim succeed "$MDGAME/Final Fantasy VII (USA) (Disc 1).chd"
-grep -q 'romm-run --download' "$MDTRACE" && pass "M2b: partial set (disc-path launch) triggers download" || fail "M2b: no download when launched via a disc path"
-grep -q '^LAUNCHED ' "$MDTRACE" && pass "M2b: emulator launched after completing the set" || fail "M2b: emulator not launched"
+grep -q 'romm-run --fetch-next-disc' "$MDTRACE" && pass "M2b: partial set (disc-path launch) triggers next-disc fetch" || fail "M2b: no fetch when launched via a disc path"
+grep -q '^LAUNCHED ' "$MDTRACE" && pass "M2b: emulator launched" || fail "M2b: emulator not launched"
 
-# M3: discs missing, download FAILS to materialize -> NO launch (honest exit).
+# M3: all discs missing, fetch FAILS -> NO launch (disc 1 absent = black screen; honest exit).
 build_md_sandbox 3
 run_shim fail "$MDROM/Final Fantasy VII (USA).m3u"
-grep -q 'romm-run --download' "$MDTRACE" && pass "M3: download attempted" || fail "M3: no download attempt"
-grep -q '^LAUNCHED ' "$MDTRACE" && fail "M3: emulator launched with missing discs (BLACK SCREEN)" || pass "M3: emulator NOT launched when discs stayed missing"
+grep -q 'romm-run --fetch-next-disc' "$MDTRACE" && pass "M3: fetch attempted" || fail "M3: no fetch attempt"
+grep -q '^LAUNCHED ' "$MDTRACE" && fail "M3: emulator launched with disc 1 missing (BLACK SCREEN)" || pass "M3: emulator NOT launched when disc 1 stayed missing"
+
+# M4 (lodor#7 never-gate-harder): disc 1 present, discs 2/3 missing, fetch FAILS ->
+# the game still launches on the discs it has.
+build_md_sandbox 4
+echo chd-bytes > "$MDGAME/Final Fantasy VII (USA) (Disc 1).chd"
+run_shim fail "$MDROM/Final Fantasy VII (USA).m3u"
+grep -q 'romm-run --fetch-next-disc' "$MDTRACE" && pass "M4: fetch attempted for the missing discs" || fail "M4: no fetch attempt"
+grep -q '^LAUNCHED ' "$MDTRACE" && pass "M4: emulator launched despite failed later-disc fetch" || fail "M4: launch wrongly gated on later discs"
+
+# M5 (disc-1-first fresh launch): 0-byte .m3u stub -> --download fills disc 1 + full
+# playlist; NO --fetch-next-disc in the same launch (one disc per launch); launch runs.
+build_md_sandbox 5
+: > "$MDROM/Final Fantasy VII (USA).m3u"
+run_shim succeed "$MDROM/Final Fantasy VII (USA).m3u"
+grep -q 'romm-run --download' "$MDTRACE" && pass "M5: stub fill via --download" || fail "M5: no --download for the 0-byte stub"
+grep -q 'romm-run --fetch-next-disc' "$MDTRACE" && fail "M5: same-launch next-disc fetch after the stub fill (two discs one launch)" || pass "M5: no same-launch second fetch (one disc per launch)"
+grep -q '^LAUNCHED ' "$MDTRACE" && pass "M5: emulator launched on disc 1" || fail "M5: emulator not launched after stub fill"
 
 # --- 5. POST-GAME SAVE DETECTION — [BRACKET] ROM regression (#162) ------------------
 # The post-game save block globs the save tree with the ROM basename. No-Intro names carry

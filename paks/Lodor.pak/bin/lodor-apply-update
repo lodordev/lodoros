@@ -38,6 +38,15 @@ if cp -r "$UPD/tree/." "$SDCARD/" >> "$LOG" 2>&1; then
 	sh "$PAKDIR/install.sh" >> "$LOG" 2>&1
 	rm -rf "$UPD"
 	[ -n "$VER" ] && printf '%s\n' "$VER" > "$PAKDIR/.update-applied" 2>/dev/null
+# Stamp the OS-visible version (.system/version.txt) so the launcher's MENU/About
+# screens tell the truth after an overlay update — this file was previously only
+# written at card build, so devices displayed their BIRTH version forever (found
+# 2026-07-10: a card showed 0.9.7.3 through two successful updates).
+if [ -n "$VER" ] && [ -f "$SDCARD/.system/version.txt" ]; then
+	_sha="$(sed -n 's/^sha=//p' "$UPD/READY" 2>/dev/null | head -1)"
+	printf 'LodorOS-%s\n%s\n' "$VER" "${_sha:-updated}" > "$SDCARD/.system/version.txt.new" \
+		&& mv "$SDCARD/.system/version.txt.new" "$SDCARD/.system/version.txt" || true
+fi
 	echo "$(date '+%F %T') update applied${VER:+ -> $VER}" >> "$LOG"
 else
 	echo "$(date '+%F %T') overlay copy FAILED - staging kept, retrying next boot" >> "$LOG"
