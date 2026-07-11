@@ -35,6 +35,23 @@ SANDBOX="$(mktemp -d /tmp/autoheal-check.XXXXXX)"
 DPIDS=""
 cleanup() {
 	for p in $DPIDS; do kill "$p" 2>/dev/null; done
+	# The self-heal path spawns a DETACHED runner that first runs the applier, THEN
+	# exec()s into romm-syncd — so a single sweep races the applier→exec transition and
+	# leaks the re-exec'd daemon (the recurring nextui-flake root cause: leaked daemons
+	# load the box and starve other suites' 30s timeouts). Every leaked proc's cmdline
+	# carries the unique $SANDBOX path. Settle, then double-tap to catch both the applier
+	# phase and the re-exec'd daemon; loop until the sweep comes back empty.
+	_tries=0
+	while [ "$_tries" -lt 5 ]; do
+		_hits=""
+		for _lp in $(pgrep -f "$SANDBOX" 2>/dev/null); do
+			[ "$_lp" = "$$" ] && continue
+			kill -9 "$_lp" 2>/dev/null; _hits=1
+		done
+		[ -z "$_hits" ] && break
+		sleep 0.3
+		_tries=$((_tries + 1))
+	done
 	rm -rf "$SANDBOX"
 }
 trap cleanup EXIT INT TERM

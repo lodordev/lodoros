@@ -249,8 +249,12 @@ fi
 #   M1 real .m3u + all discs present    -> NO network-engine call, direct launch.
 #   M2 real .m3u + all discs MISSING    -> --fetch-next-disc lands disc 1, launch (discs
 #                                          2/3 still stubs — first-disc gate only).
-#   M2b disc-1 PATH launch, disc 2/3 missing -> sibling .m3u resolved, --fetch-next-disc
-#                                          fired, launch proceeds.
+#   M2b disc-1 PATH launch (inside the DOT-hidden ".<Game>/" folder — lodor#7 UX fix),
+#                                          disc 2/3 missing -> sibling .m3u resolved
+#                                          (dot-strip mapping), --fetch-next-disc fired,
+#                                          launch proceeds.
+#   M2c LEGACY non-dot disc-1 PATH launch -> sibling .m3u still resolved (raw-name
+#                                          mapping — pre-migration cards keep working).
 #   M3 all discs missing + fetch FAILS  -> NO launch (honest exit, never a black screen).
 #   M4 disc 1 present + fetch FAILS     -> LAUNCH anyway (never gate harder than disc 1).
 #   M5 0-byte .m3u stub                 -> --download (disc-1-first fill), NO same-launch
@@ -264,16 +268,18 @@ build_md_sandbox() {
 	MDPAK="$MDSD/Tools/miyoomini/Lodor.pak"
 	MDSYS="$MDSD/.system/miyoomini/bin"
 	MDROM="$MDSD/Roms/PlayStation (PS)"
-	MDGAME="$MDROM/Final Fantasy VII (USA)"
+	# The per-game disc folder is DOT-HIDDEN (lodor#7 UX fix) — the layout the engine
+	# writes now; M2c builds its own legacy non-dot game explicitly.
+	MDGAME="$MDROM/.Final Fantasy VII (USA)"
 	MDTRACE="$MDSD/md-trace.log"
 	mkdir -p "$MDPAK/bin" "$MDSYS" "$MDGAME" "$MDSD/Saves"
 	: > "$MDTRACE"
 
-	# the .m3u playlist (a REAL 183-ish-byte file, exactly the field-repro shape)
+	# the .m3u playlist (a REAL file with dot-relative disc lines, the engine's shape)
 	cat > "$MDROM/Final Fantasy VII (USA).m3u" <<'M3U'
-Final Fantasy VII (USA)/Final Fantasy VII (USA) (Disc 1).chd
-Final Fantasy VII (USA)/Final Fantasy VII (USA) (Disc 2).chd
-Final Fantasy VII (USA)/Final Fantasy VII (USA) (Disc 3).chd
+.Final Fantasy VII (USA)/Final Fantasy VII (USA) (Disc 1).chd
+.Final Fantasy VII (USA)/Final Fantasy VII (USA) (Disc 2).chd
+.Final Fantasy VII (USA)/Final Fantasy VII (USA) (Disc 3).chd
 M3U
 
 	# fake real emulator: logs "LAUNCHED <rom>" so we can assert it ran (or didn't).
@@ -294,9 +300,9 @@ echo "romm-run \$*" >> "$MDTRACE"
 case "\$1" in
 	--download)
 		printf '%s\n%s\n%s\n' \
-			"Final Fantasy VII (USA)/Final Fantasy VII (USA) (Disc 1).chd" \
-			"Final Fantasy VII (USA)/Final Fantasy VII (USA) (Disc 2).chd" \
-			"Final Fantasy VII (USA)/Final Fantasy VII (USA) (Disc 3).chd" \
+			".Final Fantasy VII (USA)/Final Fantasy VII (USA) (Disc 1).chd" \
+			".Final Fantasy VII (USA)/Final Fantasy VII (USA) (Disc 2).chd" \
+			".Final Fantasy VII (USA)/Final Fantasy VII (USA) (Disc 3).chd" \
 			> "$MDROM/Final Fantasy VII (USA).m3u"
 		echo chd-bytes > "$MDGAME/Final Fantasy VII (USA) (Disc 1).chd"
 		for d in 2 3; do : > "$MDGAME/Final Fantasy VII (USA) (Disc \$d).chd"; done
@@ -362,13 +368,30 @@ grep -q 'romm-run --fetch-next-disc' "$MDTRACE" && pass "M2: next-disc fetch tri
 grep -q '^LAUNCHED ' "$MDTRACE" && pass "M2: emulator launched with disc 1 present" || fail "M2: emulator not launched after disc 1 landed"
 [ -s "$MDGAME/Final Fantasy VII (USA) (Disc 2).chd" ] && fail "M2: disc 2 fetched same-launch (should be one disc per launch)" || pass "M2: later discs untouched (disc-1-first)"
 
-# M2b: minui passed disc 1's PATH (disc 1 present) but disc 2/3 missing -> the shim
-# resolves the sibling .m3u and fetches the next missing disc before launch.
+# M2b: minui passed disc 1's PATH inside the DOT-hidden folder (disc 1 present) but
+# disc 2/3 missing -> the shim dot-strips the folder name, resolves the sibling .m3u
+# and fetches the next missing disc before launch (lodor#7 UX fix mapping).
 build_md_sandbox 2b
 echo chd-bytes > "$MDGAME/Final Fantasy VII (USA) (Disc 1).chd"
 run_shim succeed "$MDGAME/Final Fantasy VII (USA) (Disc 1).chd"
-grep -q 'romm-run --fetch-next-disc' "$MDTRACE" && pass "M2b: partial set (disc-path launch) triggers next-disc fetch" || fail "M2b: no fetch when launched via a disc path"
+grep -q 'romm-run --fetch-next-disc' "$MDTRACE" && pass "M2b: partial set (dot-folder disc-path launch) triggers next-disc fetch" || fail "M2b: no fetch when launched via a dot-folder disc path"
 grep -q '^LAUNCHED ' "$MDTRACE" && pass "M2b: emulator launched" || fail "M2b: emulator not launched"
+
+# M2c: LEGACY layout (pre-migration card): non-dot folder, non-dot m3u lines, disc-1
+# PATH launch -> the raw-name mapping still resolves the sibling .m3u and the fetch
+# fires. Pre-dot cards must keep working until migrateLegacyM3U converges them.
+build_md_sandbox 2c
+MDLEGACY="$MDROM/Final Fantasy VII (USA)"
+mkdir -p "$MDLEGACY"
+cat > "$MDROM/Final Fantasy VII (USA).m3u" <<'M3U'
+Final Fantasy VII (USA)/Final Fantasy VII (USA) (Disc 1).chd
+Final Fantasy VII (USA)/Final Fantasy VII (USA) (Disc 2).chd
+Final Fantasy VII (USA)/Final Fantasy VII (USA) (Disc 3).chd
+M3U
+echo chd-bytes > "$MDLEGACY/Final Fantasy VII (USA) (Disc 1).chd"
+run_shim succeed "$MDLEGACY/Final Fantasy VII (USA) (Disc 1).chd"
+grep -q 'lodor-sync --check-rom' "$MDTRACE" && pass "M2c: legacy disc-path launch resolved the sibling .m3u (raw-name mapping)" || fail "M2c: legacy disc path no longer maps to its .m3u"
+grep -q '^LAUNCHED ' "$MDTRACE" && pass "M2c: emulator launched on the legacy layout" || fail "M2c: emulator not launched on the legacy layout"
 
 # M3: all discs missing, fetch FAILS -> NO launch (disc 1 absent = black screen; honest exit).
 build_md_sandbox 3
@@ -398,7 +421,7 @@ grep -q '^LAUNCHED ' "$MDTRACE" && pass "M5: emulator launched on disc 1" || fai
 # launch — exactly M1. Before the CR-strip fix every line failed the [ -s ] check
 # (trailing \r in the path) so complete games silently never launched.
 build_md_sandbox 6
-printf '#EXTM3U\r\n# burned on Windows\r\nFinal Fantasy VII (USA)/Final Fantasy VII (USA) (Disc 1).chd\r\nFinal Fantasy VII (USA)/Final Fantasy VII (USA) (Disc 2).chd\r\nFinal Fantasy VII (USA)/Final Fantasy VII (USA) (Disc 3).chd\r\n' \
+printf '#EXTM3U\r\n# burned on Windows\r\n.Final Fantasy VII (USA)/Final Fantasy VII (USA) (Disc 1).chd\r\n.Final Fantasy VII (USA)/Final Fantasy VII (USA) (Disc 2).chd\r\n.Final Fantasy VII (USA)/Final Fantasy VII (USA) (Disc 3).chd\r\n' \
 	> "$MDROM/Final Fantasy VII (USA).m3u"
 for d in 1 2 3; do echo chd-bytes > "$MDGAME/Final Fantasy VII (USA) (Disc $d).chd"; done
 run_shim succeed "$MDROM/Final Fantasy VII (USA).m3u"

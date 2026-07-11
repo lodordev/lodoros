@@ -1,13 +1,9 @@
-# LodorOS 0.9.8
+# LodorOS 0.9.8.1
 
-Quality-of-life release: sync you can see, updates you can trust.
+Multi-disc menu fix.
 
 ## What changed
-- **"Last synced: 2h ago" everywhere.** Every device now shows when it last successfully synced (menu on muOS/Knulli/NextUI, home screen on Android) — stamped only on verified server contact, never guessed.
-- **Long operations can be stopped.** Sync, downloads, and BIOS fetches show live progress and stop honestly when you press B.
-- **Updates resume and can be undone.** Interrupted update downloads continue where they stopped; every installed update keeps a rollback copy, and a "revert last update" option appears when one exists.
-- **Android checks for updates** (once a day, silently) and shows an "Update available" row; optional "notify me if syncing fails" alert — off by default, errors only, never chatty.
-- **Consistency + docs:** the same action now has the same name on every device; cards ship a plain-text guide for pre-configured setup; Knulli uninstall instructions name the actual files.
+- **Multi-disc games now show a single entry.** Previously a multi-disc game (e.g. Legend of Dragoon) appeared twice in the system folder — the launchable playlist AND a browsable folder whose disc files all looked identical (the disc number was stripped from the display). The disc folder is now hidden, so you see one launchable entry; disc-swapping happens inside the emulator as it should. Games already part-downloaded are migrated automatically on next launch.
 
 ## Install / update
 Existing devices: **Update Lodor** (LodorOS) or the store update (NextUI/muOS/Knulli). Config, saves, and ROMs are preserved.

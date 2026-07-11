@@ -47,14 +47,18 @@ trap 'rm -f "$INGAME_LOCK" "$GAME_ACTIVE" 2>/dev/null' EXIT INT TERM HUP QUIT
 # menu — never a black screen, never a harder gate than the game actually needs.
 
 # Resolve the playlist path for the passed ROM: the .m3u itself, or the sibling
-# "<Game>.m3u" beside the "<Game>/" folder a disc file lives in. Empty = not multi-disc.
+# "<Game>.m3u" beside the ".<Game>/" folder a disc file lives in — the per-game disc
+# folder is DOT-HIDDEN (lodor#7 UX fix). Legacy non-dot folders and already-dot game
+# names both still map: try the folder name raw, then dot-stripped. Empty = not
+# multi-disc.
 _lodor_m3u_for() {
 	case "$1" in
 		*.m3u) printf '%s' "$1"; return 0 ;;
 	esac
-	# $1 = <sys>/<Game>/<disc>.chd  ->  <sys>/<Game>.m3u
+	# $1 = <sys>/.<Game>/<disc>.chd  ->  <sys>/<Game>.m3u
 	_gd=$(dirname "$1"); _pd=$(dirname "$_gd"); _gn=$(basename "$_gd")
 	_cand="$_pd/$_gn.m3u"
+	[ -f "$_cand" ] || _cand="$_pd/${_gn#.}.m3u"
 	[ -f "$_cand" ] && printf '%s' "$_cand"
 }
 
