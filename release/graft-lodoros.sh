@@ -24,6 +24,7 @@ cp -a "$MONO/lodoros/emus-h700" emus-h700
 cp -a "$MONO/lodoros/emus-my355" emus-my355
 cp -a "$MONO/lodoros/config.json.example" config.json.example 2>/dev/null || true
 cp -a "$MONO/lodoros/wifi.txt.example"    wifi.txt.example    2>/dev/null || true
+cp -a "$MONO/lodoros/README-CONFIG.txt"   README-CONFIG.txt   2>/dev/null || true
 
 echo ">> add LodorOS release tooling + config contract"
 cp -a "$MONO/release"  release

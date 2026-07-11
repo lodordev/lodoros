@@ -1,10 +1,20 @@
 #!/bin/sh
-# lodor-apply-update — boot-time applier for a staged LodorOS self-update.
+# lodor-apply-update — boot-time applier for a staged LodorOS self-update, and (lodor#47)
+# the boot-time executor of a user-armed REVERT of the last applied update.
 #
 # Runs from auto.sh BEFORE romm-syncd starts (install.sh guarantees the ordering), the one
 # moment nothing Lodor-owned is executing — a running binary cannot be replaced on FAT32.
 # The staging ($PAKDIR/.update) was downloaded, sha256-verified, and extracted by the engine's
 # --fetch-update; READY is written LAST, so its presence means "complete verified tree".
+#
+# Rollback (lodor#47): before the overlay copy, every card file the staged tree will REPLACE
+# is mirrored into $PAKDIR/.update-rollback/<new-version>/tree/ (plain files, FAT32-safe;
+# only the most recent set is kept), with the rolled-from version in <set>/rolled-from.
+# "Revert last update" in Update Lodor.pak arms $PAKDIR/.update-rollback/revert-requested;
+# this script restores the mirror at the next boot — same safe moment, same idempotent-copy
+# failure model as the apply. Files a bad update ADDED are left in place (inert without the
+# old binaries referencing them); rollback staging is best-effort insurance — if it can't be
+# written (card full) the update still applies, just without a revert offer.
 #
 # Failure model: the overlay copy is idempotent, so an interrupted apply (power yank) simply
 # re-runs at the next boot — staging is only removed after install.sh succeeds. No staging =>
@@ -14,7 +24,55 @@ SDCARD="${SDCARD_PATH:-/mnt/SDCARD}"
 PLAT="${PLATFORM:-miyoomini}"
 PAKDIR="$SDCARD/Tools/$PLAT/Lodor.pak"
 UPD="$PAKDIR/.update"
+RB="$PAKDIR/.update-rollback"
 LOG="$PAKDIR/update.log"
+
+logln(){ echo "$(date '+%F %T') $1" >> "$LOG"; }
+
+# stamp_version <ver> <line2> — temp+mv rewrite of the OS-visible version file so the
+# launcher's MENU/About screens tell the truth (only when the file exists — card-built).
+stamp_version(){
+	[ -n "$1" ] && [ -f "$SDCARD/.system/version.txt" ] || return 0
+	printf 'LodorOS-%s\n%s\n' "$1" "$2" > "$SDCARD/.system/version.txt.new" \
+		&& mv "$SDCARD/.system/version.txt.new" "$SDCARD/.system/version.txt" || true
+}
+
+# rb_set — print the (single, most-recent) usable rollback set dir, rc 1 when none.
+rb_set(){
+	for _d in "$RB"/*/; do
+		[ -d "${_d%/}/tree" ] && [ -f "${_d%/}/rolled-from" ] && { printf '%s' "${_d%/}"; return 0; }
+	done
+	return 1
+}
+
+# ---- revert (lodor#47) — runs FIRST: an armed revert is the user's latest explicit intent.
+if [ -f "$RB/revert-requested" ]; then
+	RBSET="$(rb_set)" || RBSET=""
+	if [ -n "$RBSET" ]; then
+		OLD="$(head -1 "$RBSET/rolled-from" 2>/dev/null)"
+		logln "reverting last update -> ${OLD:-unknown}"
+		killall romm-syncd 2>/dev/null
+		sleep 1
+		if cp -r "$RBSET/tree/." "$SDCARD/" >> "$LOG" 2>&1; then
+			chmod +x "$SDCARD/.system/$PLAT/bin/lodor-sync" 2>/dev/null
+			# install.sh is idempotent by contract: re-chmods the pak, re-swaps the minarch
+			# shim from the (now restored) template, re-asserts the auto.sh lines.
+			sh "$PAKDIR/install.sh" >> "$LOG" 2>&1
+			[ "$OLD" != "unknown" ] && stamp_version "$OLD" "reverted"
+			[ -n "$OLD" ] && [ "$OLD" != "unknown" ] && printf '%s\n' "$OLD" > "$PAKDIR/.update-applied" 2>/dev/null
+			# A staged NEWER tree would re-apply exactly what was just undone: discard it.
+			rm -rf "$UPD"
+			rm -rf "$RB"   # consumed — the revert offer disappears until the next update
+			logln "revert applied${OLD:+ -> $OLD}"
+		else
+			logln "revert copy FAILED - rollback kept, retrying next boot"
+		fi
+	else
+		logln "revert requested but no usable rollback set - discarding request"
+		rm -rf "$RB"
+	fi
+	exit 0
+fi
 
 [ -f "$UPD/READY" ] || exit 0
 [ -d "$UPD/tree" ] || { rm -rf "$UPD"; exit 0; }   # half-staged (no READY-worthy tree): discard
@@ -23,11 +81,48 @@ VER="$(sed -n 's/^version=//p' "$UPD/READY" 2>/dev/null | head -1)"
 # Capture the staged sha NOW: READY is deleted (rm -rf "$UPD") before the version.txt
 # stamp below runs — reading it there yielded "" forever (line 2 was always "updated").
 SHA="$(sed -n 's/^sha=//p' "$UPD/READY" 2>/dev/null | head -1)"
-echo "$(date '+%F %T') applying staged update${VER:+ ($VER)}" >> "$LOG"
+logln "applying staged update${VER:+ ($VER)}"
 
 # The LAUNCHER is never touched from this path — minui swaps are the sentinel-guarded A/B
 # flow's job (separate, later). Strip any launcher bytes a mis-built asset might carry.
 rm -rf "$UPD/tree/.system/$PLAT/bin/minui" "$UPD/tree/.system"/*/bin/minui 2>/dev/null
+
+# ---- rollback staging (lodor#47): mirror what this apply will replace, BEFORE the copy.
+# Runs AFTER the minui strip so only files that will actually be overlaid are captured.
+# The rolled-from version comes from the OS version stamp, falling back to the last-applied
+# marker; "unknown" still stages files (a revert restores bytes; the stamp is best-effort).
+RBSET="$RB/${VER:-unknown}"
+if [ -d "$RBSET/tree" ] && [ -f "$RBSET/rolled-from" ]; then
+	# A COMPLETE set for this same version already exists: this is the idempotent
+	# re-run of an interrupted apply. The card is (part-)overwritten by now, so
+	# re-mirroring would poison the rollback with new bytes — keep the true
+	# pre-update mirror staged by the first attempt. (rolled-from is written LAST,
+	# so its presence means the mirror is whole.)
+	logln "rollback already staged for ${VER:-unknown} - keeping the pre-update mirror"
+else
+	OLDVER="$(sed -n '1s/^LodorOS-//p' "$SDCARD/.system/version.txt" 2>/dev/null)"
+	[ -n "$OLDVER" ] || OLDVER="$(head -1 "$PAKDIR/.update-applied" 2>/dev/null)"
+	[ -n "$OLDVER" ] || OLDVER="unknown"
+	rm -rf "$RB"   # bounded: only the most recent rollback set is ever kept
+	mkdir -p "$RBSET/tree" 2>/dev/null
+	( cd "$UPD/tree" 2>/dev/null && find . -type f ) | while IFS= read -r _rel; do
+		_rel="${_rel#./}"
+		[ -f "$SDCARD/$_rel" ] || continue   # files the update ADDS have nothing to roll back to
+		_dst="$RBSET/tree/$(dirname "$_rel")"
+		mkdir -p "$_dst" && cp "$SDCARD/$_rel" "$_dst/" || { : > "$RB/stage-failed"; break; }
+	done
+	if [ -f "$RB/stage-failed" ]; then
+		# Best-effort insurance failed (card full?): a HALF mirror must never be restorable —
+		# the update still applies, it just can't offer a revert.
+		logln "rollback staging FAILED - applying update WITHOUT a revert option"
+		rm -rf "$RB"
+	elif printf '%s\n' "$OLDVER" > "$RBSET/rolled-from" 2>/dev/null; then
+		logln "rollback staged ($OLDVER kept in .update-rollback/${VER:-unknown})"
+	else
+		logln "rollback marker write FAILED - applying update WITHOUT a revert option"
+		rm -rf "$RB"
+	fi
+fi
 
 # Belt-and-braces: our daemon must not exec the engine mid-swap (normally not yet started —
 # our auto.sh line precedes its start line; this covers a manual/re-run invocation).
@@ -41,16 +136,13 @@ if cp -r "$UPD/tree/." "$SDCARD/" >> "$LOG" 2>&1; then
 	sh "$PAKDIR/install.sh" >> "$LOG" 2>&1
 	rm -rf "$UPD"
 	[ -n "$VER" ] && printf '%s\n' "$VER" > "$PAKDIR/.update-applied" 2>/dev/null
-# Stamp the OS-visible version (.system/version.txt) so the launcher's MENU/About
-# screens tell the truth after an overlay update — this file was previously only
-# written at card build, so devices displayed their BIRTH version forever (found
-# 2026-07-10: a card showed 0.9.7.3 through two successful updates).
-if [ -n "$VER" ] && [ -f "$SDCARD/.system/version.txt" ]; then
-	printf 'LodorOS-%s\n%s\n' "$VER" "${SHA:-updated}" > "$SDCARD/.system/version.txt.new" \
-		&& mv "$SDCARD/.system/version.txt.new" "$SDCARD/.system/version.txt" || true
-fi
-	echo "$(date '+%F %T') update applied${VER:+ -> $VER}" >> "$LOG"
+	# Stamp the OS-visible version (.system/version.txt) so the launcher's MENU/About
+	# screens tell the truth after an overlay update — this file was previously only
+	# written at card build, so devices displayed their BIRTH version forever (found
+	# 2026-07-10: a card showed 0.9.7.3 through two successful updates).
+	stamp_version "$VER" "${SHA:-updated}"
+	logln "update applied${VER:+ -> $VER}"
 else
-	echo "$(date '+%F %T') overlay copy FAILED - staging kept, retrying next boot" >> "$LOG"
+	logln "overlay copy FAILED - staging kept, retrying next boot"
 fi
 exit 0

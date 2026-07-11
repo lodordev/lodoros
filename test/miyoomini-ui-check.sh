@@ -175,6 +175,68 @@ grep -q '^killall minui-presenter' "$TRACE" && pass "U4: presenter lifecycle (ki
 grep -Eq '^(show\.elf|say\.elf)' "$TRACE" && fail "U4: miyoomini backend leaked onto my355" || pass "U4: no show/say.elf on my355"
 grep -Eq '^(reboot|poweroff)' "$TRACE" && fail "U4: rebooted the host (stub chose Later)" || pass "U4: no reboot (Later chosen)"
 
+# ─── 3b. UPDATE PAK — revert last update (lodor#47) ────────────────────────────────
+# The display-law-sensitive surface: say.elf CANNOT ask a question (exits 0 on A and B
+# alike — workspace/all/say/say.c), so miyoomini consent is the open-again pattern and
+# must never grow a presenter/list/killall; my355 gets a real minui-list menu row.
+say "[3b/5] update pak — revert flows (lodor#47)"
+
+mk_rollback() { # creates a usable rollback set in the case's Lodor.pak
+	RBDIR="$LP/.update-rollback/0.9.7.7"
+	mkdir -p "$RBDIR/tree/Tools/$PLATC/Lodor.pak"
+	printf 'previous-engine\n' > "$RBDIR/tree/Tools/$PLATC/Lodor.pak/lodor-sync"
+	printf '0.9.7.6\n' > "$RBDIR/rolled-from"
+}
+
+# U5: miyoomini + rollback set, up to date -> the terminal message OFFERS the undo and
+# arms the open-again window; nothing is staged yet, and no wedge vector appears.
+build_upd U5 miyoomini no 0
+mk_rollback
+run_upd
+grep -q 'undo' "$TRACE" && pass "U5: up-to-date terminal offers the undo" || fail "U5: undo offer missing from terminal message"
+[ -f "$LP/.update-rollback/revert-offer" ] && pass "U5: open-again offer armed" || fail "U5: revert-offer file not written"
+[ -f "$LP/.update-rollback/revert-requested" ] && fail "U5: revert armed on FIRST open (consent must be the re-open)" || pass "U5: first open arms nothing"
+no_wedge_asserts U5
+
+# U6: second open with the fresh offer -> revert armed for the boot applier, power-cycle
+# message, NO network pass (the check ran once, in U5's open).
+run_upd
+[ -f "$LP/.update-rollback/revert-requested" ] && pass "U6: re-open within the window armed the revert" || fail "U6: revert-requested not written"
+[ -f "$LP/.update-rollback/revert-offer" ] && fail "U6: offer file must be consumed" || pass "U6: offer consumed"
+grep -q 'Revert is ready' "$TRACE" && pass "U6: power-cycle revert message shown" || fail "U6: revert-ready message missing"
+[ "$(grep -c '^lodor-sync --check-update' "$TRACE")" = 1 ] \
+	&& pass "U6: revert arming needed no second network pass" || fail "U6: unexpected engine calls: $(grep -c '^lodor-sync --check-update' "$TRACE")"
+no_wedge_asserts U6
+
+# U7: my355 + rollback set -> a minui-list menu appears first; the stub picks neither row
+# ("Later"), which falls through to the normal check flow (presenter runs, host untouched).
+build_upd U7 my355 no 0
+mk_rollback
+run_upd
+grep -q '^minui-list .*Update Lodor' "$TRACE" && pass "U7: revert menu offered via minui-list on my355" || fail "U7: no revert menu on my355"
+grep -q '^lodor-sync --check-update' "$TRACE" && pass "U7: unrecognized selection falls through to the normal flow" || fail "U7: normal flow never ran"
+[ -f "$LP/.update-rollback/revert-requested" ] && fail "U7: revert armed without selection" || pass "U7: nothing armed without selection"
+
+# U8: my355 selects the revert row -> armed + reboot offer, and NO network call at all
+# (a revert needs no Wi-Fi); the stub answers the row text for every list, so the reboot
+# offer resolves to "Later" and the host never reboots.
+build_upd U8 my355 no 0
+mk_rollback
+cat > "$FAKEBIN/minui-list" <<EOF
+#!/bin/sh
+echo "minui-list \$*" >> "$TRACE"
+out=""
+while [ \$# -gt 0 ]; do [ "\$1" = --write-location ] && out="\$2"; shift; done
+[ -n "\$out" ] && echo "Revert last update (back to 0.9.7.6)" > "\$out"
+exit 0
+EOF
+chmod +x "$FAKEBIN/minui-list"
+run_upd
+[ -f "$LP/.update-rollback/revert-requested" ] && pass "U8: selecting the row armed the revert" || fail "U8: revert-requested not written"
+grep -q '^minui-list .*Reboot to install' "$TRACE" && pass "U8: reboot offer presented after arming" || fail "U8: no reboot offer after arming"
+grep -q '^lodor-sync ' "$TRACE" && fail "U8: engine invoked on a revert (needs no network)" || pass "U8: no engine call on the revert path"
+grep -Eq '^(reboot|poweroff)' "$TRACE" && fail "U8: rebooted the host" || pass "U8: no reboot (stub declined)"
+
 # ─── 4. RESET WIFI PAK ───────────────────────────────────────────────────────────
 build_rw() { # $1 = case id, $2 = platform
 	build_common "$1" "$2"

@@ -1,11 +1,13 @@
-# LodorOS 0.9.7.11
+# LodorOS 0.9.8
 
-Multi-disc hotfix release.
+Quality-of-life release: sync you can see, updates you can trust.
 
 ## What changed
-- **Multi-disc games launch after the first disc again.** 0.9.7.9 introduced disc-1-first downloads, but the launcher refused to start a game while later discs were still placeholders — each launch downloaded one more disc and never played. The game list file now tracks exactly the discs on your card (growing as the background prefetch completes the set), so you play immediately. Part-downloaded games are migrated automatically.
-- **Pressing B during a download now actually cancels it.** The partial file is kept, so resuming later continues where it stopped.
-- **Miyoo Mini update screens fixed:** no more corrupted image band; messages wrap instead of running off the screen.
+- **"Last synced: 2h ago" everywhere.** Every device now shows when it last successfully synced (menu on muOS/Knulli/NextUI, home screen on Android) — stamped only on verified server contact, never guessed.
+- **Long operations can be stopped.** Sync, downloads, and BIOS fetches show live progress and stop honestly when you press B.
+- **Updates resume and can be undone.** Interrupted update downloads continue where they stopped; every installed update keeps a rollback copy, and a "revert last update" option appears when one exists.
+- **Android checks for updates** (once a day, silently) and shows an "Update available" row; optional "notify me if syncing fails" alert — off by default, errors only, never chatty.
+- **Consistency + docs:** the same action now has the same name on every device; cards ship a plain-text guide for pre-configured setup; Knulli uninstall instructions name the actual files.
 
 ## Install / update
 Existing devices: **Update Lodor** (LodorOS) or the store update (NextUI/muOS/Knulli). Config, saves, and ROMs are preserved.

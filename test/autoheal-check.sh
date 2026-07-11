@@ -135,6 +135,24 @@ grep -q "NEW-engine-healed" "$PAK/lodor-sync" 2>/dev/null \
 	|| fail "version.txt line 2 != staged sha: '$(sed -n 2p "$SD/.system/version.txt" 2>/dev/null)'"
 grep -q "heal-apply done" "$SLOG" 2>/dev/null \
 	&& pass "apply outcome logged" || fail "apply outcome log line missing"
+# lodor#47: the boot-time apply staged a rollback mirror BEFORE overlaying
+RBSET1="$PAK/.update-rollback/0.9.9-test"
+grep -q "old-engine" "$RBSET1/tree/Tools/miyoomini/Lodor.pak/lodor-sync" 2>/dev/null \
+	&& pass "rollback mirror holds the pre-update engine (lodor#47)" \
+	|| fail "rollback mirror missing/wrong: $RBSET1"
+[ "$(head -1 "$RBSET1/rolled-from" 2>/dev/null)" = "0.0.0-birth" ] \
+	&& pass "rolled-from marker = 0.0.0-birth (from version.txt)" \
+	|| fail "rolled-from marker wrong: '$(head -1 "$RBSET1/rolled-from" 2>/dev/null)'"
+# and an armed revert through the SAME heal-apply boot path restores that mirror
+: > "$PAK/.update-rollback/revert-requested"
+SDCARD_PATH="$SD" PLATFORM=miyoomini sh "$PAK/bin/lodor-apply-update" >/dev/null 2>&1
+grep -q "old-engine" "$PAK/lodor-sync" 2>/dev/null \
+	&& pass "revert restored the pre-update engine" || fail "revert did not restore the engine"
+[ "$(sed -n 1p "$SD/.system/version.txt" 2>/dev/null)" = "LodorOS-0.0.0-birth" ] \
+	&& pass "version.txt stamped back on revert" \
+	|| fail "version.txt after revert: '$(sed -n 1p "$SD/.system/version.txt" 2>/dev/null)'"
+[ ! -d "$PAK/.update-rollback" ] \
+	&& pass "rollback set consumed by the revert" || fail "rollback left behind after revert"
 
 # ─── 2. SENTINEL PRESENT -> BYTE-IDENTICAL NO-OP ───────────────────────────────────
 say "[2/4] auto.sh already carrying the sentinel is untouched"

@@ -193,6 +193,86 @@ if [ ! -x "$SYNC_BIN" ]; then
 	exit 1
 fi
 
+# ---- revert last update (lodor#47) --------------------------------------------------
+# The boot applier stages what each update replaces into $LODOR/.update-rollback/<ver>/
+# (tree mirror + rolled-from marker, written last). Arming a revert only touches a marker
+# here — the RESTORE runs at the next boot via lodor-apply-update, the same safe moment
+# and idempotent-copy model as the apply itself. Needs no network.
+#
+# Exposure per display law:
+#   non-mm — a minui-list menu (Check for updates / Revert last update), shown ONLY when a
+#            usable rollback set exists (no dead menu row).
+#   miyoomini — say.elf cannot ask a question (it exits 0 on A and B alike; workspace/all/
+#            say/say.c), and minui-list/presenter/killall are #19-banned. Consent follows
+#            this pak's own doctrine — OPENING the pak is the confirmation: the up-to-date
+#            terminal offers "open again soon to undo", and a re-open within the window
+#            arms the revert. Both buttons on the say.elf screens only acknowledge.
+RB="$LODOR/.update-rollback"
+rb_set(){
+	for _d in "$RB"/*/; do
+		[ -d "${_d%/}/tree" ] && [ -f "${_d%/}/rolled-from" ] && { printf '%s' "${_d%/}"; return 0; }
+	done
+	return 1
+}
+RBSET="$(rb_set 2>/dev/null)" || RBSET=""
+RBFROM=""
+[ -n "$RBSET" ] && RBFROM="$(head -1 "$RBSET/rolled-from" 2>/dev/null)"
+[ -n "$RBFROM" ] || RBFROM="the previous version"
+REVERT_OFFER="$RB/revert-offer"
+REVERT_OFFER_WINDOW=180   # seconds a miyoomini "open again to undo" offer stays live
+
+arm_revert(){
+	: > "$RB/revert-requested"
+	log "revert armed -> $RBFROM (restores at next boot)"
+}
+
+# Already armed from a prior run: replay the terminal state; never re-download anything.
+if [ -n "$RBSET" ] && [ -f "$RB/revert-requested" ]; then
+	if [ -n "$MM" ]; then
+		log "ui final: revert already armed (miyoomini power-cycle message)"
+		mm_final "Revert is ready. Turn the device off and on to go back to $RBFROM."
+	else
+		offer_reboot "A revert to $RBFROM is ready."
+	fi
+	exit 0
+fi
+
+# miyoomini second-open confirmation: a FRESH offer from the previous open arms the revert.
+# The offer file is consumed either way; a stale one just falls through to the normal flow.
+if [ -n "$MM" ] && [ -n "$RBSET" ] && [ -f "$REVERT_OFFER" ]; then
+	_now="$(date +%s)"
+	_arm="$(head -1 "$REVERT_OFFER" 2>/dev/null)"
+	case "$_arm" in ''|*[!0-9]*) _arm=0 ;; esac
+	rm -f "$REVERT_OFFER" 2>/dev/null
+	_age=$(( _now - _arm ))
+	if [ "$_age" -ge 0 ] && [ "$_age" -le "$REVERT_OFFER_WINDOW" ]; then
+		arm_revert
+		mm_final "Revert is ready. Turn the device off and on to go back to $RBFROM."
+		exit 0
+	fi
+	log "revert offer expired (age ${_age}s) - continuing normal update flow"
+fi
+
+# non-mm menu: only when a usable rollback set exists — no dead menu row.
+if [ -z "$MM" ] && [ -n "$RBSET" ] && have_ui && command -v minui-list >/dev/null 2>&1; then
+	killall minui-presenter >/dev/null 2>&1
+	printf 'Check for updates\nRevert last update (back to %s)\n' "$RBFROM" > /tmp/upd-menu
+	minui-list --disable-auto-sleep --file /tmp/upd-menu --format text \
+		--title "Update Lodor" --confirm-text "SELECT" --cancel-text "EXIT" \
+		--write-location /tmp/upd-menu-out >/dev/null 2>&1
+	_mrc=$?
+	_msel="$(cat /tmp/upd-menu-out 2>/dev/null)"
+	rm -f /tmp/upd-menu /tmp/upd-menu-out 2>/dev/null
+	[ "$_mrc" = 0 ] || exit 0   # EXIT/B: the user backed out — change nothing
+	case "$_msel" in
+		"Revert last update"*)
+			arm_revert
+			offer_reboot "Revert to $RBFROM is ready."
+			exit 0 ;;
+	esac
+	# "Check for updates" (or an unrecognized selection) falls through to the normal flow.
+fi
+
 # Already staged from a prior run: don't re-download, just tell them (sticky) and offer a reboot.
 if [ -f "$LODOR/.update/READY" ]; then
 	_sv="$(get_setting update_staged)"; [ -n "$_sv" ] || _sv="An update"
@@ -222,7 +302,14 @@ CURRENT="$(result_tok "$OUT" current)"
 if [ "$(result_tok "$OUT" update)" != "1" ]; then
 	set_setting update_available ""
 	if [ -n "$MM" ]; then
-		ui_sticky "You're up to date ($CURRENT)."
+		if [ -n "$RBSET" ]; then
+			# lodor#47 miyoomini consent path: offer the undo NOW, arm on a re-open
+			# within the window (see the revert block above — say.elf can't ask).
+			printf '%s\n' "$(date +%s)" > "$REVERT_OFFER" 2>/dev/null
+			ui_sticky "You're up to date ($CURRENT). Open this pak again soon to undo the last update (back to $RBFROM)."
+		else
+			ui_sticky "You're up to date ($CURRENT)."
+		fi
 	else
 		ui_sticky "You're on the latest version ($CURRENT)."
 	fi

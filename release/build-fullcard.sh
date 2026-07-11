@@ -95,6 +95,14 @@ done
 [ -z "$missing" ] || { echo "FATAL: base card platforms with NO $VER overlay in $OUT:$missing — a partial overlay set would ship a mixed-version card. Build all platform overlays (release.sh) or use a base card scoped to the built platforms." >&2; exit 2; }
 echo ">> overlay coverage OK: every base-card platform overlaid to $VER" >&2
 
+# lodoros#15: card-root provisioning docs ship fresh from THIS release's tree, never riding
+# stale from the base card (which may predate them). config.json.example is the template;
+# README-CONFIG.txt explains the pre-provisioning path (copy to Tools/<plat>/Lodor.pak/
+# config.json -> wizard skipped).
+cp "$ROOT/lodoros/config.json.example" "$card/config.json.example" || { echo "FATAL: config.json.example missing from lodoros tree" >&2; exit 2; }
+cp "$ROOT/lodoros/README-CONFIG.txt"   "$card/README-CONFIG.txt"   || { echo "FATAL: README-CONFIG.txt missing from lodoros tree" >&2; exit 2; }
+echo ">> staged card-root provisioning docs: config.json.example + README-CONFIG.txt" >&2
+
 # version stamp — both files the OS/About screen read (root version.txt is also rewritten by
 # build-public.sh; .system/version.txt is the About-screen source and must carry LodorOS-<VER>).
 printf '%s\n' "$VER" > "$card/version.txt"

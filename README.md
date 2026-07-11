@@ -47,6 +47,7 @@ paks/
   ADBD, Bootlogo, Clock, Files, IP, Input, Remove Loading, Wifi   bundled community/MinUI
                  tool paks (their own LICENSE files included) — see CREDITS
 config.json.example   server + paired token (copied to the pak's config.json on device)
+README-CONFIG.txt     how to pre-provision a card (config.json in place -> setup wizard skipped)
 wifi.txt.example      SD-root Wi-Fi credentials (Miyoo Mini colon format)
 ```
 

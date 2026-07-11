@@ -33,6 +33,7 @@ PARSE_TARGETS="
 $LODOROS/emus-h700/N64.pak/launch.sh
 $LODOROS/emus-h700/DC.pak/launch.sh
 $LODOROS/emus-h700/PSP.pak/launch.sh
+$LODOROS/paks/Lodor.pak/bin/lodor-apply-update
 $LODOROS/paks/Lodor.pak/bin/minarch-shim.sh
 $LODOROS/paks/Lodor.pak/bin/romm-session-sync
 $LODOROS/paks/Lodor.pak/bin/romm-syncd
