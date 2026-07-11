@@ -233,15 +233,19 @@ EOF
 fi
 
 # --- 4. MULTI-DISC LAUNCH TRACE (lodor#7 disc-1-first + the FFVII black-screen gate) ---
-# The engine downloads multi-disc games DISC-1-FIRST: a populated .m3u with 0-byte
-# later discs is a VALID state. The shim must (a) re-trigger the fetch for that state
-# via --fetch-next-disc (a populated .m3u is not a 0-byte stub, so the stub gate can't),
+# The engine downloads multi-disc games DISC-1-FIRST: a populated .m3u with an
+# incomplete disc set is a VALID state. The shim must (a) re-trigger the fetch for
+# that state via --fetch-next-disc, DETECTED through `lodor-sync --check-rom`
+# (offline manifest census — the .m3u is LOCAL-ONLY now, so scanning its refs would
+# always read "complete"; these sandbox cards carry the legacy full-list shape and
+# the fake --check-rom censuses their refs, exactly the engine's legacy fallback),
 # (b) gate the launch on the FIRST disc only (pcsx boots disc 1; stub later discs are
 # the design), and (c) still never hand pcsx a missing disc 1 (the black-screen fix).
+# Fail-open is load-bearing: no lodor-sync binary -> no fetch, launch as before (M7).
 # Fake romm-run implements the engine's disc-1-first semantics: --download on a 0-byte
 # .m3u stub writes the FULL playlist + disc 1 only; --fetch-next-disc materializes the
 # first missing disc (per $MD_DL_MODE succeed/fail).
-#   M1 real .m3u + all discs present    -> NO engine call, emulator launched directly.
+#   M1 real .m3u + all discs present    -> NO network-engine call, direct launch.
 #   M2 real .m3u + all discs MISSING    -> --fetch-next-disc lands disc 1, launch (discs
 #                                          2/3 still stubs — first-disc gate only).
 #   M2b disc-1 PATH launch, disc 2/3 missing -> sibling .m3u resolved, --fetch-next-disc
@@ -306,6 +310,32 @@ esac
 exit 0
 EOF
 	chmod +x "$MDPAK/bin/romm-run"
+
+	# fake OFFLINE engine: --check-rom with the real engine's census semantics for a
+	# manifest-less card (the legacy fallback: the m3u's own refs ARE the full set).
+	# Logged to the same trace so legs can assert the detection actually ran.
+	cat > "$MDPAK/lodor-sync" <<EOF
+#!/bin/sh
+echo "lodor-sync \$*" >> "$MDTRACE"
+if [ "\$1" = "--check-rom" ]; then
+	m="\$2"
+	[ -f "\$m" ] || { echo "RESULT complete=0 reason=missing"; exit 0; }
+	[ -s "\$m" ] || { echo "RESULT complete=0 reason=stub"; exit 0; }
+	dir=\$(dirname "\$m"); any=0; CR=\$(printf '\r')
+	while IFS= read -r ln || [ -n "\$ln" ]; do
+		ln=\${ln%"\$CR"}
+		[ -n "\$ln" ] || continue
+		case "\$ln" in \#*) continue ;; esac
+		any=1
+		case "\$ln" in /*) dp="\$ln" ;; *) dp="\$dir/\$ln" ;; esac
+		[ -s "\$dp" ] || { echo "RESULT complete=0"; exit 0; }
+	done < "\$m"
+	[ "\$any" = 0 ] && { echo "RESULT complete=0 reason=empty-m3u"; exit 0; }
+	echo "RESULT complete=1"
+fi
+exit 0
+EOF
+	chmod +x "$MDPAK/lodor-sync"
 }
 
 # run the shim with a given ROM arg (the .m3u, or a disc path)
@@ -320,6 +350,7 @@ build_md_sandbox 1
 for d in 1 2 3; do echo chd-bytes > "$MDGAME/Final Fantasy VII (USA) (Disc $d).chd"; done
 run_shim succeed "$MDROM/Final Fantasy VII (USA).m3u"
 grep -q 'romm-run --' "$MDTRACE" && fail "M1: engine called for a complete game" || pass "M1: no engine call when all discs present"
+grep -q 'lodor-sync --check-rom' "$MDTRACE" && pass "M1: completeness asked via --check-rom (offline)" || fail "M1: --check-rom not consulted"
 grep -q '^LAUNCHED ' "$MDTRACE" && pass "M1: emulator launched directly" || fail "M1: emulator not launched"
 
 # M2: real .m3u, all discs missing, fetch SUCCEEDS -> --fetch-next-disc lands disc 1,
@@ -372,6 +403,16 @@ for d in 1 2 3; do echo chd-bytes > "$MDGAME/Final Fantasy VII (USA) (Disc $d).c
 run_shim succeed "$MDROM/Final Fantasy VII (USA).m3u"
 grep -q 'romm-run --' "$MDTRACE" && fail "M6: engine called for a complete CRLF playlist" || pass "M6: no engine call for complete CRLF+comment m3u"
 grep -q '^LAUNCHED ' "$MDTRACE" && pass "M6: emulator launched directly (CRLF+comment m3u)" || fail "M6: complete CRLF m3u did not launch"
+
+# M7 (fail-open, load-bearing): the offline engine binary is MISSING -> the shim cannot
+# ask --check-rom, so it must assume complete (no fetch) and launch exactly as before —
+# a broken/missing engine must never brick launches (the shim's HARD RULE).
+build_md_sandbox 7
+rm -f "$MDPAK/lodor-sync"
+echo chd-bytes > "$MDGAME/Final Fantasy VII (USA) (Disc 1).chd"
+run_shim succeed "$MDROM/Final Fantasy VII (USA).m3u"
+grep -q 'romm-run --fetch-next-disc' "$MDTRACE" && fail "M7: fetch fired with no engine to ask (fail-open broken)" || pass "M7: no fetch when --check-rom unavailable (fail-open)"
+grep -q '^LAUNCHED ' "$MDTRACE" && pass "M7: emulator launched with detection unavailable" || fail "M7: launch gated on a missing engine binary"
 
 # --- 5. POST-GAME SAVE DETECTION — [BRACKET] ROM regression (#162) ------------------
 # The post-game save block globs the save tree with the ROM basename. No-Intro names carry

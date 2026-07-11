@@ -61,15 +61,33 @@ export PATH="$SDCARD/Tools/$PLAT/Wifi.pak/bin/$PLAT:$SDCARD/Tools/$PLAT/Wifi.pak
 # below is structurally unreachable there (asserted by test/miyoomini-ui-check.sh).
 have_ui(){ [ -z "$MM" ] && command -v minui-presenter >/dev/null 2>&1; }
 
-# mm_show <phase-key> — fire-and-forget: draw res/<phase-key>.png via show.elf (self-exits).
+# mm_wrap <text> — insert \n every ~36 chars, word-safe: GFX_blitMessage (say.elf's
+# renderer) splits ONLY on \n and centers each row; a long single line runs off BOTH
+# screen edges (hardware photo, 2026-07-11). Pure busybox sh, no fold dependency.
+mm_wrap(){
+	_out=""; _cur=""
+	for _w in $1; do
+		if [ -z "$_cur" ]; then _cur="$_w"
+		elif [ "${#_cur}" -le 36 ] && [ "$(( ${#_cur} + 1 + ${#_w} ))" -le 36 ]; then _cur="$_cur $_w"
+		else _out="${_out}${_out:+
+}${_cur}"; _cur="$_w"
+		fi
+	done
+	printf '%s' "${_out}${_out:+
+}${_cur}"
+}
+# mm_show <phase-key> — miyoomini phases are LOG-ONLY: the PNG-via-show.elf experiment
+# rendered as a corrupted pixel band on hardware (grayscale vs 32bpp blit, photo-verified
+# 2026-07-11), and show.elf from menu context stays banned. The final say.elf message is
+# the one screen the user gets — phases live in update.log.
 mm_show(){
-	[ -x "$SYSBIN/show.elf" ] && [ -f "$PAKDIR/res/$1.png" ] || return 1
-	"$SYSBIN/show.elf" "$PAKDIR/res/$1.png" >/dev/null 2>&1
+	log "phase: $1"
+	return 0
 }
 # mm_final <msg> — FOREGROUND say.elf: draws, blocks until A/B, exits through GFX teardown.
 mm_final(){
 	if [ -x "$SYSBIN/say.elf" ]; then
-		"$SYSBIN/say.elf" "$1" >/dev/null 2>&1
+		"$SYSBIN/say.elf" "$(mm_wrap "$1")" >/dev/null 2>&1
 	else
 		say "$1"; sleep 4; clear_say
 	fi

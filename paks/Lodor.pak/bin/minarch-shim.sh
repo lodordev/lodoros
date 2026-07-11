@@ -58,22 +58,20 @@ _lodor_m3u_for() {
 	[ -f "$_cand" ] && printf '%s' "$_cand"
 }
 
-# Return 0 (true) if the .m3u lists a disc whose file is missing or 0-byte.
-_lodor_m3u_incomplete() {
-	_m="$1"; [ -f "$_m" ] || return 1
-	_dir=$(dirname "$_m"); _any=0; _CR=$(printf '\r')
-	while IFS= read -r _line || [ -n "$_line" ]; do
-		_line=${_line%"$_CR"}
-		[ -n "$_line" ] || continue
-		case "$_line" in \#*) continue ;; esac
-		_any=1
-		case "$_line" in
-			/*) _dp="$_line" ;;      # absolute (defensive; engine writes relative)
-			*)  _dp="$_dir/$_line" ;;
-		esac
-		[ -s "$_dp" ] || return 0    # missing or 0-byte disc -> incomplete
-	done < "$_m"
-	[ "$_any" = 0 ] && return 0      # a playlist that lists no discs is broken -> incomplete
+# Return 0 (true) if the engine's OFFLINE completeness gate says this ROM's disc set is
+# incomplete (RESULT complete=0). The .m3u is LOCAL-ONLY now — it lists just the discs
+# with real bytes, because minui refuses to launch past a listed stub — so scanning its
+# refs would ALWAYS read "complete"; the full canonical set lives in the mirror manifest
+# and only `lodor-sync --check-rom` (filesystem + manifest, no config/network/radio) can
+# answer. Same env/cd shape as the BIOS gate below. FAIL-OPEN: no binary / unparseable
+# output -> 1 ("complete") -> no fetch, the launch proceeds exactly as before.
+_lodor_rom_incomplete() {
+	_ckbin="$SDCARD/Tools/$PLAT/Lodor.pak/lodor-sync"
+	[ -x "$_ckbin" ] || return 1
+	_ckout=$( cd "$SDCARD/Tools/$PLAT/Lodor.pak" 2>/dev/null && \
+		SDCARD_PATH="$SDCARD" PLATFORM="$PLAT" BASE_PATH="$SDCARD" CFW=MinUI \
+		./lodor-sync --check-rom "$1" 2>/dev/null )
+	case "$_ckout" in *"complete=0"*) return 0 ;; esac
 	return 1
 }
 
@@ -111,11 +109,12 @@ if [ -f "$ROM" ] && [ ! -s "$ROM" ]; then
 fi
 # Real .m3u (or a disc beside one) with an incomplete disc set — fetch the NEXT missing
 # disc before launching (the re-trigger the 0-byte-stub gate can't provide: a populated
-# .m3u isn't a stub, so without this discs 2+ would strand forever). Skipped right after
-# a stub fill (disc 1 just landed this launch — one disc per launch, that's the design;
-# the daemon prefetch completes the rest in the background).
+# .m3u isn't a stub, so without this discs 2+ would strand forever). Detection is the
+# engine's --check-rom (manifest census — the local-only playlist can't answer this).
+# Skipped right after a stub fill (disc 1 just landed this launch — one disc per launch,
+# that's the design; the daemon prefetch completes the rest in the background).
 _LODOR_M3U=$(_lodor_m3u_for "$ROM")
-if [ -n "$_LODOR_M3U" ] && [ -s "$_LODOR_M3U" ] && [ "$_LODOR_STUB_FILLED" != 1 ] && _lodor_m3u_incomplete "$_LODOR_M3U"; then
+if [ -n "$_LODOR_M3U" ] && [ -s "$_LODOR_M3U" ] && [ "$_LODOR_STUB_FILLED" != 1 ] && _lodor_rom_incomplete "$_LODOR_M3U"; then
 	[ -x "$ROMM_RUN" ] && "$ROMM_RUN" --fetch-next-disc "$_LODOR_M3U" >/dev/null 2>&1
 fi
 # LAUNCH GATE — FIRST DISC ONLY (never harder than the game needs): if disc 1 is present

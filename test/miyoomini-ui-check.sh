@@ -14,7 +14,7 @@
 #      phase PNGs + a final foreground say.elf, and ZERO minui-presenter / minui-list / killall;
 #      the staging path ends in the power-cycle message with NO reboot/poweroff call.
 #   3. UPDATE PAK / my355 — control: presenter + minui-list still drive the UI, unchanged.
-#   4. RESET WIFI PAK / miyoomini — resetting-wifi PNG + say.elf terminal, ZERO presenter/
+#   4. RESET WIFI PAK / miyoomini — log-only phases + wrapped say.elf terminal, ZERO presenter/
 #      minui-list/killall.  / my355 — presenter + minui-list still used.
 #   5. RES PNGs — the committed phase PNGs exist (mm_show hard-requires them).
 #
@@ -145,14 +145,12 @@ say "[2/5] update pak — miyoomini (show.elf/say.elf backend)"
 # U1: update available, fetch succeeds -> phase PNGs, power-cycle final, NO reboot.
 build_upd U1 miyoomini yes 0
 run_upd
-grep -q '^show.elf .*/res/connecting-wifi.png'    "$TRACE" && pass "U1: connecting-wifi PNG drawn" || fail "U1: connecting-wifi PNG not drawn"
-grep -q '^show.elf .*/res/checking-updates.png'   "$TRACE" && pass "U1: checking-updates PNG drawn" || fail "U1: checking-updates PNG not drawn"
-grep -q '^show.elf .*/res/downloading-update.png' "$TRACE" && pass "U1: downloading-update PNG drawn" || fail "U1: downloading-update PNG not drawn"
-grep -q '^say.elf .*Turn the device off and on to install' "$TRACE" \
+grep -q '^show.elf ' "$TRACE" && fail "U1: show.elf invoked from menu context (banned 2026-07-11 — corrupted-band photo)" || pass "U1: no show.elf from menu context (phases log-only)"
+grep -q '^say.elf' "$TRACE" && grep -q 'Update downloaded' "$TRACE" \
 	&& pass "U1: staging ends in the power-cycle say.elf message" || fail "U1: power-cycle final message missing"
-grep -q '^say.elf .*Powering off is always safe' "$TRACE" && pass "U1: 'powering off is safe' present" || fail "U1: safety sentence missing"
+grep -q 'Turn the device' "$TRACE" && grep -q 'always safe' "$TRACE" && pass "U1: 'powering off is safe' present" || fail "U1: safety sentence missing"
 grep -Eq '^(reboot|poweroff)' "$TRACE" && fail "U1: reboot/poweroff invoked on miyoomini (must be power-cycle msg only)" || pass "U1: no reboot call"
-awk '/^lodor-sync --fetch-update/{f=NR} /^say.elf .*Turn the device off/{s=NR} END{exit !(f&&s&&f<s)}' "$TRACE" \
+awk '/^lodor-sync --fetch-update/{f=NR} /^say.elf .*Update downloaded/{s=NR} END{exit !(f&&s&&f<s)}' "$TRACE" \
 	&& pass "U1: final message ordered after staging" || fail "U1: staging/final order wrong"
 no_wedge_asserts U1
 
@@ -198,7 +196,7 @@ say "[4/5] reset wifi pak — miyoomini + my355 control"
 # R1: miyoomini happy path -> resetting-wifi PNG, say.elf terminal, no wedge vectors.
 build_rw R1 miyoomini
 run_rw
-grep -q '^show.elf .*/res/resetting-wifi.png' "$TRACE" && pass "R1: resetting-wifi PNG drawn" || fail "R1: resetting-wifi PNG not drawn"
+grep -q '^show.elf ' "$TRACE" && fail "R1: show.elf invoked from menu context (banned)" || pass "R1: no show.elf (phases log-only)"
 grep -q '^wifi-reset' "$TRACE" && pass "R1: usb re-enum reset ran" || fail "R1: wifi-reset not invoked"
 grep -q '^say.elf .*back online' "$TRACE" && pass "R1: terminal state via say.elf" || fail "R1: say.elf terminal missing"
 no_wedge_asserts R1
@@ -213,9 +211,9 @@ grep -Eq '^(show\.elf|say\.elf)' "$TRACE" && fail "R2: miyoomini backend leaked 
 
 # ─── 5. COMMITTED RES PNGs ───────────────────────────────────────────────────────
 say "[5/5] committed phase PNGs"
-for p in "$UPDPAK/res/connecting-wifi.png" "$UPDPAK/res/checking-updates.png" \
-         "$UPDPAK/res/downloading-update.png" "$RWPAK/res/resetting-wifi.png"; do
-	[ -s "$p" ] && pass "$(basename "$(dirname "$(dirname "$p")")")/res/$(basename "$p") present" || fail "missing $p (run release/mkmsgpng.py)"
+# PNGs deliberately removed 2026-07-11 (grayscale-blit corruption on hardware); assert ABSENT
+for p in "$UPDPAK/res/connecting-wifi.png" "$RWPAK/res/resetting-wifi.png"; do
+	[ -e "$p" ] && fail "stale phase PNG still shipped: $p" || pass "phase PNG absent: $(basename "$p")"
 done
 
 say ""
