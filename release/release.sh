@@ -43,8 +43,11 @@ VERSION=$(cat "$ROOT/VERSION" 2>/dev/null || true)
 # and gate.sh fails closed on a missing readelf instead of passing vacuously — so the gate
 # runs inside the same golang image that built the binary.
 gate_static_go(){ # <abs-path-to-bin-under-$OUT>
+  # gate chatter -> stderr: every caller runs inside $(...) capture (build_engine etc.);
+  # gate "ok:" lines on stdout would pollute the captured "<triple> <hash>" value that
+  # feeds the provenance manifest.
   docker run --rm -v "$ROOT":/repo -v "$OUT":/artifacts -w /repo \
-    golang:1.25-bookworm sh release/gate.sh static-go "/artifacts/$(basename "$1")" \
+    golang:1.25-bookworm sh release/gate.sh static-go "/artifacts/$(basename "$1")" >&2 \
     || fail "$(basename "$1") failed static-go gate"
 }
 build_engine(){ # <goarch> <goarm-or-empty> <triple> [tags]
@@ -321,7 +324,7 @@ build_engine_android(){
     go build -trimpath -ldflags "-s -w -X lodor/buildinfo.Version=$VERSION" -o /src/.out-android-arm64 ./cmd/lodor-sync 2>&1 | tail -2 || fail "engine build android-arm64"
   mv "$ROOT/engine/.out-android-arm64" "$bin" || fail "engine build android-arm64 — no output (compile failed above)"
   docker run --rm -v "$ROOT":/repo -v "$OUT":/artifacts -w /repo \
-    golang:1.25-bookworm sh release/gate.sh android-engine "/artifacts/$(basename "$bin")" \
+    golang:1.25-bookworm sh release/gate.sh android-engine "/artifacts/$(basename "$bin")" >&2 \
     || fail "lodor-sync-android-arm64 failed android-engine gate"
   echo "android-arm64 $(hash "$bin")"
 }

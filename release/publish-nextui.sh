@@ -33,7 +33,7 @@ ZIPF="$OUT/Lodor.pak.zip"
 FULLZIP="$OUT/Lodor-NextUI-$VERSION.zip"
 # The distribution repo clone (root pak.json + a public copy of the pak source). Kept OUTSIDE
 # this repo; override with LODOR_NEXTUI_GIT.
-NGIT="${LODOR_NEXTUI_GIT:-$HOME/work/lodor-nextui-git}"
+NGIT="${LODOR_NEXTUI_GIT:-/mnt/user/appdata/lodor/work/lodor-nextui-git}"
 REPO_SLUG="lodordev/lodor-nextui"
 fail(){ echo "PUBLISH ABORT: $*" >&2; exit 1; }
 hash(){ sha256sum "$1" | cut -d" " -f1; }
@@ -118,17 +118,37 @@ publish(){
 
   echo "== 2/5 tag + release $VERSION =="
   ( cd "$NGIT" && git tag "$VERSION" 2>/dev/null || true; git push -q origin "$VERSION" ) || fail "tag push"
-  _body=$(python3 -c 'import json,sys; print(json.dumps({"tag_name":sys.argv[1],"name":"Lodor "+sys.argv[1],"body":sys.argv[2],"prerelease":False}))' "$VERSION" "$NOTES")
-  _rel=$(github POST "/repos/$REPO_SLUG/releases" "$_body") || fail "release create"
-  _relid=$(printf '%s' "$_rel" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+  # Idempotent re-run (M5, the publish-lanes mkrel pattern): reuse an existing release
+  # for this tag — a publish interrupted after release-create must be re-runnable.
+  _relid=$(github GET "/repos/$REPO_SLUG/releases/tags/$VERSION" 2>/dev/null \
+    | python3 -c 'import json,sys;print(json.load(sys.stdin).get("id",""))' 2>/dev/null || true)
+  if [ -n "$_relid" ]; then
+    echo "  release $VERSION already exists (id $_relid) — reusing"
+  else
+    _body=$(python3 -c 'import json,sys; print(json.dumps({"tag_name":sys.argv[1],"name":"Lodor "+sys.argv[1],"body":sys.argv[2],"prerelease":False}))' "$VERSION" "$NOTES")
+    _rel=$(github POST "/repos/$REPO_SLUG/releases" "$_body") || fail "release create"
+    _relid=$(printf '%s' "$_rel" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+  fi
 
   echo "== 3/5 upload assets =="
   _tok="${GITHUB_TOKEN:-$(cat "${LODOR_GH_TOKEN_FILE:-$HOME/.config/lodor/github-token}")}"
   for f in "$ZIPF" "$FULLZIP"; do
+    _n=$(basename "$f")
+    # M5 re-run tolerance: replace any same-name asset from a previous (possibly
+    # interrupted) run — step 4/5 then re-download-verifies whatever is live.
+    _aid=$(github GET "/repos/$REPO_SLUG/releases/$_relid/assets?per_page=100" \
+      | python3 -c 'import json,sys
+n=sys.argv[1]
+for a in json.load(sys.stdin):
+    if a.get("name")==n: print(a["id"]); break' "$_n" 2>/dev/null || true)
+    if [ -n "$_aid" ]; then
+      echo "  replacing existing asset: $_n (id $_aid)"
+      github DELETE "/repos/$REPO_SLUG/releases/assets/$_aid" || fail "stale-asset delete: $_n"
+    fi
     curl -sfS -X POST -H "Authorization: Bearer $_tok" -H "Content-Type: application/zip" \
       --data-binary @"$f" \
-      "https://uploads.github.com/repos/$REPO_SLUG/releases/$_relid/assets?name=$(basename "$f")" >/dev/null \
-      || fail "asset upload: $(basename "$f")"
+      "https://uploads.github.com/repos/$REPO_SLUG/releases/$_relid/assets?name=$_n" >/dev/null \
+      || fail "asset upload: $_n"
   done
 
   echo "== 4/5 verify assets LIVE (re-download + sha256) =="
@@ -162,7 +182,11 @@ d["changelog"] = cl
 d["version"] = ver
 open(dst, "w").write(json.dumps(d, indent=2, ensure_ascii=False) + "\n")
 PY
-  ( cd "$NGIT" && git add pak.json && git commit -q -m "Lodor $VERSION" && git push -q origin HEAD ) \
+  # M5: tolerate an unchanged pak.json (re-run after the bump already landed) — an
+  # empty diff skips the commit but the push + store-visibility contract still runs.
+  ( cd "$NGIT" && git add pak.json && \
+    { git diff --cached --quiet || git commit -q -m "Lodor $VERSION"; } && \
+    git push -q origin HEAD ) \
     || fail "pak.json push"
   echo "== published: $REPO_SLUG@$VERSION — the store catalog picks it up within ~1 hour =="
 }

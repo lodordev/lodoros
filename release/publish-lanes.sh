@@ -24,7 +24,7 @@ ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 OUTDIR=${1:?usage: publish-lanes.sh <release-out-dir>}
 OUTDIR=$(cd "$OUTDIR" && pwd)
 VERSION=$(cat "$ROOT/VERSION")
-WORK="${LODOR_PUBSYNC_DIR:-$HOME/work/pubsync}"
+WORK="${LODOR_PUBSYNC_DIR:-/mnt/user/appdata/lodor/work/pubsync}"
 export LODOR_PII_REQUIRED=1
 fail(){ echo "PUBLISH-LANES ABORT: $*" >&2; exit 1; }
 
@@ -52,23 +52,39 @@ commit_push(){ # <repo> <msg>
 echo "== 1/4 source sync (mono main -> lane repos) =="
 for r in lodor lodoros lodor-muos lodor-knulli; do clone_fresh "$r"; done
 
+# NOTE (space-safety): `for f in $(ls -A)` word-splits names containing spaces (rm'ing
+# fragments, missing the real entry). Plain globs don't split; the three patterns
+# (* / .[!.]* / ..?*) cover all entries incl. dotfiles, and the -e/-L guard drops any
+# literally-unmatched pattern (POSIX sh has no nullglob).
 cd "$WORK/lodor"
-for f in $(ls -A); do case "$f" in .git|.github|README.md|RELEASES.md|BLUEPRINT.md|CREDITS.md|LICENSE|.gitignore) ;; *) rm -rf "$f";; esac; done
+for f in * .[!.]* ..?*; do
+  [ -e "$f" ] || [ -L "$f" ] || continue
+  case "$f" in .git|.github|README.md|RELEASES.md|BLUEPRINT.md|CREDITS.md|LICENSE|.gitignore) ;; *) rm -rf "$f";; esac
+done
 git -C "$ROOT" archive main engine | tar -x --strip-components=1 -C .
 
 cd "$WORK/lodoros"
-for f in $(ls -A); do case "$f" in .git|.github|README.md) ;; *) rm -rf "$f";; esac; done
+for f in * .[!.]* ..?*; do
+  [ -e "$f" ] || [ -L "$f" ] || continue
+  case "$f" in .git|.github|README.md) ;; *) rm -rf "$f";; esac
+done
 git -C "$ROOT" archive main lodoros | tar -x --strip-components=1 -C .
 git -C "$ROOT" archive main release contract LICENSE | tar -x -C .
 rm -rf ledger.md todo.txt release/out engine integrations
 
 cd "$WORK/lodor-muos"
-for f in $(ls -A); do case "$f" in .git) ;; *) rm -rf "$f";; esac; done
+for f in * .[!.]* ..?*; do
+  [ -e "$f" ] || [ -L "$f" ] || continue
+  case "$f" in .git) ;; *) rm -rf "$f";; esac
+done
 git -C "$ROOT" archive main integrations/muos | tar -x --strip-components=2 -C .
 git -C "$ROOT" archive main LICENSE | tar -x -C .
 
 cd "$WORK/lodor-knulli"
-for f in $(ls -A); do case "$f" in .git|README.md) ;; *) rm -rf "$f";; esac; done
+for f in * .[!.]* ..?*; do
+  [ -e "$f" ] || [ -L "$f" ] || continue
+  case "$f" in .git|README.md) ;; *) rm -rf "$f";; esac
+done
 git -C "$ROOT" archive main integrations/knulli | tar -x --strip-components=2 -C .
 git -C "$ROOT" archive main LICENSE | tar -x -C .
 
@@ -88,8 +104,27 @@ mkrel(){ # <repo> <body> -> id (idempotent: reuse existing release for the tag)
 }
 upl(){ # <repo> <relid> <file>
   _n=$(basename "$3")
-  # skip if the asset already exists (idempotent re-run)
-  if api GET "/repos/lodordev/$1/releases/$2/assets?per_page=100" | grep -q "\"name\": *\"$_n\""; then echo "  $_n already on release"; return; fi
+  # Idempotent AND honest (M4): a name-matched asset only counts when state=="uploaded"
+  # and its size equals the local bytes — an interrupted upload leaves state="starter"
+  # or a truncated size, and the old name-only skip let that broken asset survive every
+  # re-run. On mismatch: DELETE the asset and re-upload.
+  _existing=$(api GET "/repos/lodordev/$1/releases/$2/assets?per_page=100" \
+    | python3 -c 'import json,sys
+n=sys.argv[1]
+for a in json.load(sys.stdin):
+    if a.get("name")==n:
+        print(a.get("id",""), a.get("state",""), a.get("size",0)); break' "$_n" 2>/dev/null || true)
+  if [ -n "$_existing" ]; then
+    _aid=$(printf '%s' "$_existing" | cut -d' ' -f1)
+    _state=$(printf '%s' "$_existing" | cut -d' ' -f2)
+    _size=$(printf '%s' "$_existing" | cut -d' ' -f3)
+    _local=$(wc -c < "$3" | tr -d ' ')
+    if [ "$_state" = "uploaded" ] && [ "$_size" = "$_local" ]; then
+      echo "  $_n already on release (uploaded, $_size bytes)"; return
+    fi
+    echo "  $_n on release but state=$_state size=$_size (local $_local) — deleting + re-uploading"
+    api DELETE "/repos/lodordev/$1/releases/assets/$_aid" || fail "broken-asset delete: $_n"
+  fi
   curl -sfS -X POST -H "Authorization: Bearer $TOK" -H "Content-Type: application/octet-stream" \
     --data-binary @"$3" "https://uploads.github.com/repos/lodordev/$1/releases/$2/assets?name=$_n" >/dev/null
   echo "  uploaded $_n -> $1"

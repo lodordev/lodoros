@@ -79,7 +79,10 @@ build_card() {
 		cp "$PAK/bin/romm-syncd" "$TREE/bin/romm-syncd"
 		# test-only: the post-apply re-exec'd daemon exits 0 at lib-source, so the case ends.
 		printf 'wifi_release() { :; }\nexit 0\n' > "$TREE/lib/romm-sync-lib.sh"
-		printf 'version=0.9.9-test\n' > "$PAK/.update/READY"
+		printf 'version=0.9.9-test\nsha=cafef00dcafef00d\n' > "$PAK/.update/READY"
+		# birth-stamped version.txt: the applier must overwrite BOTH lines (F: it read
+		# READY's sha AFTER rm -rf'ing the staging, so line 2 was always "updated").
+		printf 'LodorOS-0.0.0-birth\nbirth-sha\n' > "$SD/.system/version.txt"
 	fi
 }
 
@@ -124,6 +127,12 @@ grep -q "healed auto.sh: update applier hook" "$SLOG" 2>/dev/null \
 grep -q "NEW-engine-healed" "$PAK/lodor-sync" 2>/dev/null \
 	&& pass "engine binary swapped by the boot-time apply" || fail "engine NOT swapped"
 [ ! -d "$PAK/.update" ] && pass "staging cleared after apply" || fail "staging left behind"
+[ "$(sed -n 1p "$SD/.system/version.txt" 2>/dev/null)" = "LodorOS-0.9.9-test" ] \
+	&& pass "version.txt line 1 = LodorOS-0.9.9-test" \
+	|| fail "version.txt line 1 wrong: '$(sed -n 1p "$SD/.system/version.txt" 2>/dev/null)'"
+[ "$(sed -n 2p "$SD/.system/version.txt" 2>/dev/null)" = "cafef00dcafef00d" ] \
+	&& pass "version.txt line 2 = staged sha (captured before staging rm)" \
+	|| fail "version.txt line 2 != staged sha: '$(sed -n 2p "$SD/.system/version.txt" 2>/dev/null)'"
 grep -q "heal-apply done" "$SLOG" 2>/dev/null \
 	&& pass "apply outcome logged" || fail "apply outcome log line missing"
 

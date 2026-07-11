@@ -47,7 +47,12 @@ if grep -q "# romm-syncd" "$AUTO" 2>/dev/null; then
 	echo "  [skip] auto.sh already starts romm-syncd"
 else
 	# Literal $SDCARD_PATH/$PLATFORM (relocatable; expanded on-device at boot). Detached with &.
-	printf '%s\n' 'test -x "$SDCARD_PATH/Tools/$PLATFORM/Lodor.pak/bin/romm-syncd" && "$SDCARD_PATH/Tools/$PLATFORM/Lodor.pak/bin/romm-syncd" >/dev/null 2>&1 </dev/null & # romm-syncd' >> "$AUTO"
+	# awk 1 (not a bare >> append): re-emits every line WITH a newline, so an auto.sh missing
+	# its trailing newline can't glue our line onto its last command; temp+mv (FAT32 doctrine).
+	{ awk 1 "$AUTO" && printf '%s\n' 'test -x "$SDCARD_PATH/Tools/$PLATFORM/Lodor.pak/bin/romm-syncd" && "$SDCARD_PATH/Tools/$PLATFORM/Lodor.pak/bin/romm-syncd" >/dev/null 2>&1 </dev/null & # romm-syncd'; } > "$AUTO.new" \
+		&& mv -f "$AUTO.new" "$AUTO" \
+			|| { rm -f "$AUTO.new" 2>/dev/null; echo "  ERROR: could not update auto.sh - boot hooks NOT installed"; exit 1; }
+	rm -f "$AUTO.new" 2>/dev/null
 	echo "  [ok] auto.sh starts romm-syncd at boot"
 fi
 
@@ -61,10 +66,15 @@ if grep -q "# lodor-update-apply" "$AUTO" 2>/dev/null; then
 else
 	if grep -q "# romm-syncd" "$AUTO" 2>/dev/null; then
 		awk -v ins="$APPLY_LINE" '/# romm-syncd/ && !done { print ins; done=1 } { print }' "$AUTO" > "$AUTO.new" \
-			&& mv -f "$AUTO.new" "$AUTO"
+			&& mv -f "$AUTO.new" "$AUTO" \
+			|| { rm -f "$AUTO.new" 2>/dev/null; echo "  ERROR: could not update auto.sh - boot hooks NOT installed"; exit 1; }
 		rm -f "$AUTO.new" 2>/dev/null
 	else
-		printf '%s\n' "$APPLY_LINE" >> "$AUTO"
+		# same no-trailing-newline guard as the syncd-line append above
+		{ awk 1 "$AUTO" && printf '%s\n' "$APPLY_LINE"; } > "$AUTO.new" \
+			&& mv -f "$AUTO.new" "$AUTO" \
+			|| { rm -f "$AUTO.new" 2>/dev/null; echo "  ERROR: could not update auto.sh - boot hooks NOT installed"; exit 1; }
+		rm -f "$AUTO.new" 2>/dev/null
 	fi
 	chmod +x "$AUTO"
 	echo "  [ok] auto.sh runs the update applier at boot (before the daemon)"

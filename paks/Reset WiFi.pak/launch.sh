@@ -92,6 +92,39 @@ export WIFI_LOG="$LODOR/wifi-debug.log"   # surface service-on/wait_net internal
 trap 'ui_stop; wifi_release' EXIT INT TERM HUP QUIT
 
 log "=== Reset WiFi pak start (plat=$PLAT) ==="
+
+# BUSY PRE-CHECK: the reset half below cycles the radio — doing that while a LIVE actor
+# holds the transfer mutex kills that transfer mid-flight. The old flow only discovered
+# "busy" at the bring-up half (wifi_acquire rc=2), AFTER the radio was already reset.
+# Check first; offer the honest choice where a safe question tool exists.
+if _actor_active; then
+	if [ -n "$MM" ]; then
+		# miyoomini UI law: say.elf only ACKNOWLEDGES (no question tool; minui-list and
+		# killall are illegal on this platform) — abort with the honest message.
+		log "busy pre-check: live sync holds the mutex — aborting (miyoomini, no question UI)"
+		ui_sticky "A sync is running right now — try the reset again in a minute."
+		exit 1
+	fi
+	_override=""
+	if have_ui && command -v minui-list >/dev/null 2>&1; then
+		killall minui-presenter >/dev/null 2>&1
+		printf 'Reset anyway\n' > /tmp/rw-busy
+		minui-list --disable-auto-sleep --file /tmp/rw-busy --format text \
+			--title "A sync is running. Reset anyway?" --confirm-text "YES" --cancel-text "NO" \
+			--write-location /tmp/rw-busy-out >/dev/null 2>&1
+		_brc=$?
+		_bsel="$(cat /tmp/rw-busy-out 2>/dev/null)"
+		rm -f /tmp/rw-busy /tmp/rw-busy-out 2>/dev/null
+		[ "$_brc" = 0 ] && [ "$_bsel" = "Reset anyway" ] && _override=1
+	fi
+	if [ -z "$_override" ]; then
+		log "busy pre-check: live sync holds the mutex — user declined / no question UI"
+		ui_sticky "A sync is running right now — try the reset again in a minute."
+		exit 1
+	fi
+	log "busy pre-check: user chose to reset anyway over a live sync"
+fi
+
 ui_hold resetting-wifi "Resetting Wi-Fi..."
 # The reset half. miyoomini 8188fu: the proven USB re-enum (bin/wifi-reset — power rail LEFT
 # ON, see that script's header). Every other platform has an SDIO radio — a USB unbind is

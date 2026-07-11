@@ -155,6 +155,60 @@ r=$(empty_bail)
 [ "$r" = BAILED ] && pass "empty wifi.txt -> _wifi_write_config bails (no clobber)" \
 	|| fail "empty wifi.txt -> $r (want BAILED)"
 
+say "== 4. MUTEX RECLAIM: liveness decides; age only tiebreaks unparseable owners =="
+# A LIVE holder must NEVER be revoked, however old its ts (long downloads are legitimate).
+# A dead owner is reclaimed regardless of ts age. An unparseable owner (kill -0 can't
+# answer) falls back to the age tiebreak. Plus: wifi_lock_refresh is the holder-side ts
+# bump the daemons use between engine calls.
+MLOCK="$SANDBOX/romm-wifi.lock"
+# mutex_probe <owner> <ts-age-s> <mode> — stage a lock, run wifi_acquire against it,
+# print ACQUIRED/BUSY/ERR. _radio_ready forced true so acquire returns right after the gate.
+mutex_probe() {
+	_own="$1"; _age="$2"; _mode="$3"
+	rm -rf "$MLOCK"; command mkdir -p "$MLOCK"
+	printf '%s' "$_own" > "$MLOCK/owner"
+	echo $(( $(date +%s) - _age )) > "$MLOCK/ts"
+	(
+		set +u
+		export PLATFORM=miyoomini SDCARD_PATH="$SANDBOX/card" WIFI_DBG="$SANDBOX/wifi-mutex.log"
+		. "$LIB" >/dev/null 2>&1
+		_WIFI_LOCK="$MLOCK"; WIFI_LOG="$SANDBOX/wifi-mutex.log"
+		_radio_ready() { return 0; }
+		if wifi_acquire "$_mode"; then echo ACQUIRED; else
+			rc=$?; [ "$rc" = 2 ] && echo BUSY || echo ERR
+		fi
+	)
+}
+sleep 300 & MLIVE=$!
+r=$(mutex_probe "$MLIVE" 9999 bg)
+[ "$r" = BUSY ] && pass "LIVE holder + ancient ts -> BUSY (live holder never revoked)" \
+	|| fail "live old holder -> $r (want BUSY — mid-transfer revocation regressed)"
+[ "$(cat "$MLOCK/owner" 2>/dev/null)" = "$MLIVE" ] && pass "live holder's lock left untouched" \
+	|| fail "live holder's lock files were reclaimed"
+kill "$MLIVE" 2>/dev/null; wait "$MLIVE" 2>/dev/null
+r=$(mutex_probe "$MLIVE" 0 bg)
+[ "$r" = ACQUIRED ] && pass "DEAD owner + fresh ts -> reclaimed (liveness decides, not age)" \
+	|| fail "dead fresh owner -> $r (want ACQUIRED)"
+r=$(mutex_probe "not-a-pid" 9999 bg)
+[ "$r" = ACQUIRED ] && pass "unparseable owner + stale ts -> reclaimed (age tiebreak)" \
+	|| fail "unparseable stale owner -> $r (want ACQUIRED)"
+r=$(mutex_probe "not-a-pid" 0 bg)
+[ "$r" = BUSY ] && pass "unparseable owner + fresh ts -> BUSY (age tiebreak protects)" \
+	|| fail "unparseable fresh owner -> $r (want BUSY)"
+(
+	set +u
+	export PLATFORM=miyoomini SDCARD_PATH="$SANDBOX/card" WIFI_DBG="$SANDBOX/wifi-mutex.log"
+	. "$LIB" >/dev/null 2>&1
+	_WIFI_LOCK="$MLOCK"
+	rm -rf "$MLOCK"; command mkdir -p "$MLOCK"
+	printf '%s' "$$" > "$MLOCK/owner"; echo 1000 > "$MLOCK/ts"
+	wifi_lock_refresh
+	_ts=$(cat "$MLOCK/ts" 2>/dev/null || echo 0)
+	[ $(( $(date +%s) - _ts )) -le 5 ]
+) && pass "wifi_lock_refresh bumps the held lock's ts (owner-scoped)" \
+	|| fail "wifi_lock_refresh did not bump the held lock's ts"
+rm -rf "$MLOCK"
+
 say ""
 if [ "$FAILS" -eq 0 ]; then
 	say "wifi-check: all green"

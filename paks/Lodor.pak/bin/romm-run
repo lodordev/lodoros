@@ -25,6 +25,11 @@ esac
 # blinds us to WHY a connect fails. Point it at a card log so "no usable link" is diagnosable.
 export WIFI_LOG="$PAKD/wifi-debug.log"   # unified persistent trace (== _WIFI_DBG/_wlog target); next-boot diagnosable
 . "$LIB" 2>/dev/null || { log "FATAL: lib source failed: $LIB"; exit 1; }
+# Never exit holding the coordination mutex: every path below that returns after a
+# successful wifi_acquire (engine rc pass-throughs, set -e-less error exits, signals)
+# drops the lock here. wifi_release is owner-scoped — a no-op unless WE hold it — so
+# paths that already released explicitly are unaffected.
+trap 'wifi_release' EXIT INT TERM HUP QUIT
 
 # --- Wi-Fi-only subcommands (onboarding step #38) — handled WITHOUT the engine binary. -------------
 # These are used by the native first-run Wi-Fi step. They do NOT touch the sync engine, so they run
@@ -74,7 +79,15 @@ rm -f /tmp/romm-wifi-fail 2>/dev/null
 # Bring Wi-Fi up via the §1 HONEST verified path. wifi_acquire owns /tmp/romm-phase: it writes the
 # verbose verified status (Powering radio / Connecting to <SSID> / Associated / Got IP / Online) and,
 # on failure, a SPECIFIC honest reason. romm-run does NOT pre-write a fake "Connecting..." line.
-if ! wifi_acquire fg; then
+wifi_acquire fg; _acq=$?
+if [ "$_acq" = 2 ]; then
+	# BUSY (another actor holds the coordination mutex) is NOT a radio failure: no reset-offer
+	# sentinel, no persisted radio reason — both would send the user chasing a Wi-Fi problem
+	# that doesn't exist. It clears on its own; say so honestly and get out of the way.
+	log "wifi_acquire BUSY (another sync holds the mutex) -> exit 2"
+	echo "Another sync is running — try again shortly" > /tmp/romm-phase 2>/dev/null
+	exit 2
+elif [ "$_acq" != 0 ]; then
 	log "wifi_acquire FAILED (no usable link) -> exit 2"
 	# Leave wifi_acquire's honest failure line standing (e.g. "Couldn't connect to <SSID>").
 	# Wi-Fi-class by definition: arm the launcher's reset offer (#2) and persist the honest

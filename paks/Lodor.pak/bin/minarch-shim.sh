@@ -61,9 +61,11 @@ _lodor_m3u_for() {
 # Return 0 (true) if the .m3u lists a disc whose file is missing or 0-byte.
 _lodor_m3u_incomplete() {
 	_m="$1"; [ -f "$_m" ] || return 1
-	_dir=$(dirname "$_m"); _any=0
+	_dir=$(dirname "$_m"); _any=0; _CR=$(printf '\r')
 	while IFS= read -r _line || [ -n "$_line" ]; do
+		_line=${_line%"$_CR"}
 		[ -n "$_line" ] || continue
+		case "$_line" in \#*) continue ;; esac
 		_any=1
 		case "$_line" in
 			/*) _dp="$_line" ;;      # absolute (defensive; engine writes relative)
@@ -80,9 +82,11 @@ _lodor_m3u_incomplete() {
 # is broken -> also "first missing" (honest no-launch, same as before lodor#7).
 _lodor_m3u_first_missing() {
 	_m="$1"; [ -f "$_m" ] || return 0
-	_dir=$(dirname "$_m")
+	_dir=$(dirname "$_m"); _CR=$(printf '\r')
 	while IFS= read -r _line || [ -n "$_line" ]; do
+		_line=${_line%"$_CR"}
 		[ -n "$_line" ] || continue
+		case "$_line" in \#*) continue ;; esac
 		case "$_line" in
 			/*) _dp="$_line" ;;
 			*)  _dp="$_dir/$_line" ;;
@@ -225,7 +229,10 @@ _lodor_session --session-end
 PENDING="$SDCARD/Tools/$PLAT/Lodor.pak/pending-saves.txt"
 if [ -n "$ROM" ]; then
 	_rb=$(basename "$ROM"); _rbne="${_rb%.*}"
-	# any save file for THIS rom modified since the game started (INGAME_LOCK's mtime = launch)?
+	# any save file for THIS rom present on the card? NAME-ONLY by design (CLOCK-FIX: the old
+	# `-newer $INGAME_LOCK` mtime test was dropped — RTC-less boots make mtimes lie); the
+	# engine's content-hash dedup makes a re-push of an unchanged save a no-op, so matching
+	# by name alone is safe and never loses a save to a wrong clock.
 	# MULTI-USER: scan the SAME (profile-namespaced) tree minarch wrote into. $SAVES_PATH
 	# is exported by the boot script (Saves/$LODOR_PROFILE); fall back to the shared Saves
 	# dir when unset (single-user), so the scan and the emulator write always agree.

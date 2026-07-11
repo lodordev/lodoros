@@ -57,8 +57,10 @@ heal_auto_sh() {
 			awk -v ins="$APPLY_LINE" '/# romm-syncd/ && !done { print ins; done=1 } { print }' \
 				"$AUTO" > "$AUTO.new" 2>/dev/null || { rm -f "$AUTO.new" 2>/dev/null; return 2; }
 		else
-			# no syncd line (unexpected — something else started us): append, like install.sh
-			{ cat "$AUTO" && printf '%s\n' "$APPLY_LINE"; } > "$AUTO.new" 2>/dev/null \
+			# no syncd line (unexpected — something else started us): append, like install.sh.
+			# awk 1 (not cat): re-emits every line WITH a newline, so an auto.sh missing its
+			# trailing newline can't glue the appended line onto its last command.
+			{ awk 1 "$AUTO" && printf '%s\n' "$APPLY_LINE"; } > "$AUTO.new" 2>/dev/null \
 				|| { rm -f "$AUTO.new" 2>/dev/null; return 2; }
 		fi
 	else
@@ -162,10 +164,12 @@ while :; do
 		set_clock || log "clock set failed"
 		if [ "$mode" = full ]; then
 			run_sync >> "$LOG" 2>&1; rc=$?
+			wifi_lock_refresh   # long cycle: keep the held lock's ts fresh between engine calls
 			# Save-STATES (task: los-statesync): the bare run_sync flushes pending SAVES but
 			# not STATES — drain the offline state queue on the same warm link before releasing.
 			# Best-effort: a state-drain failure never demotes the full-sync result.
 			run_sync --push-pending-states >> "$LOG" 2>&1 || true
+			wifi_lock_refresh
 			# Multi-disc prefetch (lodor#7 hybrid): after the pending queues drain, quietly
 			# complete any downloaded multi-disc game still missing discs on the SAME warm
 			# link (launches fetch disc-1-first; this is what makes mid-game disc swaps work
@@ -173,7 +177,14 @@ while :; do
 			# quietly logged. Knob: settings.conf prefetch_discs=off disables (default ON —
 			# the lib already sourced settings.conf).
 			if [ "${prefetch_discs:-on}" != "off" ]; then
-				run_sync --prefetch-discs >> "$LOG" 2>&1 || log "prefetch-discs rc=$? (retry next interval)"
+				# Re-check the in-game gate NOW: the queue drain above can run long,
+				# and a game may have started since the poll-top check — a heavy
+				# prefetch must never compete with a running game.
+				if not_in_game; then
+					run_sync --prefetch-discs >> "$LOG" 2>&1 || log "prefetch-discs rc=$? (retry next interval)"
+				else
+					log "prefetch skipped: game started during the cycle"
+				fi
 			fi
 			wifi_release
 			if [ "$rc" -eq 0 ]; then
@@ -184,6 +195,7 @@ while :; do
 			fi
 		else
 			run_sync --push-pending >> "$LOG" 2>&1; rc=$?
+			wifi_lock_refresh
 			# Save-STATES (task: los-statesync): also drain any queued STATES on the off-charge
 			# flush so a state made off-charge reaches RomM without waiting to plug in. Best-effort.
 			run_sync --push-pending-states >> "$LOG" 2>&1 || true

@@ -361,6 +361,18 @@ grep -q 'romm-run --download' "$MDTRACE" && pass "M5: stub fill via --download" 
 grep -q 'romm-run --fetch-next-disc' "$MDTRACE" && fail "M5: same-launch next-disc fetch after the stub fill (two discs one launch)" || pass "M5: no same-launch second fetch (one disc per launch)"
 grep -q '^LAUNCHED ' "$MDTRACE" && pass "M5: emulator launched on disc 1" || fail "M5: emulator not launched after stub fill"
 
+# M6 (CRLF + comments): a Windows-authored .m3u (CRLF line endings, #EXTM3U header,
+# a # comment line) with ALL discs present must parse clean: no engine call, direct
+# launch — exactly M1. Before the CR-strip fix every line failed the [ -s ] check
+# (trailing \r in the path) so complete games silently never launched.
+build_md_sandbox 6
+printf '#EXTM3U\r\n# burned on Windows\r\nFinal Fantasy VII (USA)/Final Fantasy VII (USA) (Disc 1).chd\r\nFinal Fantasy VII (USA)/Final Fantasy VII (USA) (Disc 2).chd\r\nFinal Fantasy VII (USA)/Final Fantasy VII (USA) (Disc 3).chd\r\n' \
+	> "$MDROM/Final Fantasy VII (USA).m3u"
+for d in 1 2 3; do echo chd-bytes > "$MDGAME/Final Fantasy VII (USA) (Disc $d).chd"; done
+run_shim succeed "$MDROM/Final Fantasy VII (USA).m3u"
+grep -q 'romm-run --' "$MDTRACE" && fail "M6: engine called for a complete CRLF playlist" || pass "M6: no engine call for complete CRLF+comment m3u"
+grep -q '^LAUNCHED ' "$MDTRACE" && pass "M6: emulator launched directly (CRLF+comment m3u)" || fail "M6: complete CRLF m3u did not launch"
+
 # --- 5. POST-GAME SAVE DETECTION — [BRACKET] ROM regression (#162) ------------------
 # The post-game save block globs the save tree with the ROM basename. No-Intro names carry
 # glob metacharacters ([S] [!] [b] [h] [T-En]); the old `-iname "$rom.*"` catch-all fed those

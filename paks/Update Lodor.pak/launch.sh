@@ -184,7 +184,9 @@ if [ -f "$LODOR/.update/READY" ]; then
 fi
 
 ui_hold connecting-wifi "Connecting to Wi-Fi..."
-if ! wifi_acquire; then ui_sticky "Couldn't reach the update server — check Wi-Fi."; exit 1; fi
+wifi_acquire; _acq=$?
+if [ "$_acq" = 2 ]; then ui_sticky "Another sync is running — try again shortly."; exit 1; fi
+if [ "$_acq" != 0 ]; then ui_sticky "Couldn't reach the update server — check Wi-Fi."; exit 1; fi
 set_clock || log "clock set failed - continuing"
 
 ui_hold checking-updates "Checking for updates..."

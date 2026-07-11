@@ -335,7 +335,25 @@ PY
 #   -----BEGIN ... PRIVATE KEY   PEM private key
 #   AKIA<16>                     AWS access key id
 #   authorization: bearer <...>  (case-insensitive) Authorization: Bearer header value
-#   "token":"<16+>"              high-entropy JSON token literal, placeholders excluded
+#   token= <16+>"              high-entropy JSON token literal, placeholders excluded
+# secrets_placeholder_value <value> — exit 0 iff the WHOLE value is placeholder-shaped.
+# Anchored, not substring: ^…(word)…$ over plain word-chars, then a dominance check —
+# strip every placeholder word and all separators; >=8 alphanumerics left means the
+# value carries real entropy and is NOT excused. See the test vectors at the call site.
+secrets_placeholder_value(){
+  printf '%s' "$1" | grep -qE '^<[^<>]*>$' && return 0   # whole value is <angle placeholder>
+  _pw='example|sample|dummy|paste|change.?me|placeholder|goes.?here|your.?token|token.?here|xxxxxxxx*'
+  _low=$(printf '%s' "$1" | tr 'A-Z' 'a-z')
+  printf '%s' "$_low" | grep -qE "^[a-z0-9_ .-]*($_pw)[a-z0-9_ .-]*\$" || return 1
+  # All-lowercase hyphen/underscore-joined WORDS containing a placeholder term are
+  # documentation ("paired-client-token-goes-here"): real tokens virtually always
+  # carry digits or mixed case. Keep the residual-entropy test for everything else
+  # (so q7GkP2vXn9ZjW4mT-HereR8sLbC3dQf stays flagged).
+  printf '%s' "$1" | grep -qiE "^[a-z][a-z_-]*$" && return 0
+  _resid=$(printf '%s' "$_low" | sed -E "s/($_pw)//g; s/[^a-z0-9]//g")
+  [ "${#_resid}" -lt 8 ]
+}
+
 cmd_secrets() {
   d=${1:?usage: gate.sh secrets <dir>}
   [ -d "$d" ] || fail "secrets: no such dir: $d"
@@ -355,12 +373,30 @@ $_h"
   scan "aws-access-key"       ""   'AKIA[0-9A-Z]{16}'
   # bearer: only flag token-shaped values (>=20 token chars) — '<token>'-style doc placeholders are fine
   scan "authorization-bearer" "-i" 'authorization:[[:space:]]*bearer[[:space:]]+[A-Za-z0-9._~+/=-]{20,}'
-  # high-entropy "token":"..." literal, but NOT a placeholder. Do the exclusion in a second pass:
-  # keep only files that carry a token literal whose VALUE is not an obvious placeholder.
+  # high-entropy token= ..." literal, but NOT a placeholder. The exclusion is
+  # WHOLE-VALUE anchored (#9): the old substring exclusion ('-here', 'paste', ...)
+  # excused any REAL token that merely CONTAINED one of those fragments. A value is
+  # a placeholder ONLY if (a) it is entirely an <angle-doc-placeholder>, or (b) the
+  # whole value is plain word-chars around a placeholder word AND the placeholder
+  # words DOMINATE it (stripping them leaves <8 alphanumerics — a real credential
+  # keeps its entropy after the strip and stays flagged).
+  # Test vectors:
+  #   token= q7GkP2vXn9ZjW4mT-HereR8sLbC3dQf"  -> FLAGGED (real-shaped; '-Here' is not an excuse)
+  #   token= hJ3kQ9pasteXw82LmZq4v"            -> FLAGGED (contains 'paste'; entropy dominates)
+  #   token= paste-your-token-here"            -> excluded (placeholder-dominant)
+  #   token= <YOUR_TOKEN_GOES_HERE>"           -> excluded (whole-value angle placeholder)
   _tokfiles=$(grep -rlIE '"token"[[:space:]]*:[[:space:]]*"[^"]{16,}"' "$d" 2>/dev/null || true)
   for _f in $_tokfiles; do
-    if grep -oIE '"token"[[:space:]]*:[[:space:]]*"[^"]{16,}"' "$_f" 2>/dev/null \
-        | grep -viE 'example|paste|changeme|goes-here|-here|_here|placeholder|your-token|<[^>]*>' >/dev/null 2>&1; then
+    _leak=0
+    _vals=$(grep -ohIE '"token"[[:space:]]*:[[:space:]]*"[^"]{16,}"' "$_f" 2>/dev/null \
+      | sed -E 's/^"token"[[:space:]]*:[[:space:]]*"//; s/"$//')
+    while IFS= read -r _v; do
+      [ -n "$_v" ] || continue
+      secrets_placeholder_value "$_v" || { _leak=1; break; }
+    done <<EOF
+$_vals
+EOF
+    if [ "$_leak" = 1 ]; then
       hits="$hits
 [json-token-literal]
 $_f"

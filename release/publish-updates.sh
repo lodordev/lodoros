@@ -64,10 +64,15 @@ if command -v go >/dev/null 2>&1; then
   ( cd "$ROOT/release/cmd/lodor-signmanifest" && go run . "$OUTDIR_ABS/versions.json" ) \
     || fail "manifest signing (lodor-signmanifest)"
 else
+  # Pre-check the key path is a FILE: docker -v silently CREATES a directory at a
+  # missing host path, which both wedges the mount point (root-owned dir where the
+  # key should live) and produces an unhelpful in-container read error. Fail loud first.
+  _key="${LODOR_UPDATE_SIGNING_KEY:-/mnt/user/appdata/lodor/update-signing-ed25519.key}"
+  [ -f "$_key" ] || fail "manifest signing: key is not a file at $_key (docker -v would create a directory there; fix the path/host before re-running)"
   docker run --rm \
     -v "$ROOT/release/cmd/lodor-signmanifest":/src \
     -v "$OUTDIR_ABS":/out \
-    -v "${LODOR_UPDATE_SIGNING_KEY:-/mnt/user/appdata/lodor/update-signing-ed25519.key}":/key:ro \
+    -v "$_key":/key:ro \
     -w /src -e LODOR_UPDATE_SIGNING_KEY=/key \
     golang:1.25-bookworm go run . /out/versions.json \
     || fail "manifest signing (lodor-signmanifest, docker)"
@@ -75,22 +80,43 @@ fi
 [ -f "$OUTDIR/versions.json.sig" ] || fail "signer produced no versions.json.sig"
 
 echo "== 2/4 release $TAG on $REPO_SLUG =="
-_pre=false; [ -n "$BETA" ] && _pre=true
-_body=$(python3 -c 'import json,sys; print(json.dumps({"tag_name":sys.argv[1],"name":"Lodor "+sys.argv[2],"body":sys.argv[3],"prerelease":sys.argv[4]=="true"}))' \
-  "$TAG" "$VERSION" "Self-update assets for Lodor $VERSION. Devices receive these via the in-app updater (LodorOS) or the store notice (NextUI/muOS)." "$_pre")
-_rel=$(api POST "/repos/$REPO_SLUG/releases" "$_body") || fail "release create (does $TAG already exist?)"
-_relid=$(printf '%s' "$_rel" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+# Idempotent re-run (M5, the publish-lanes mkrel pattern): reuse an existing release
+# for this tag — a publish interrupted after release-create used to be unrunnable
+# ("does $TAG already exist?") without manual API surgery.
+_relid=$(api GET "/repos/$REPO_SLUG/releases/tags/$TAG" 2>/dev/null \
+  | python3 -c 'import json,sys;print(json.load(sys.stdin).get("id",""))' 2>/dev/null || true)
+if [ -n "$_relid" ]; then
+  echo "  release $TAG already exists (id $_relid) — reusing"
+else
+  _pre=false; [ -n "$BETA" ] && _pre=true
+  _body=$(python3 -c 'import json,sys; print(json.dumps({"tag_name":sys.argv[1],"name":"Lodor "+sys.argv[2],"body":sys.argv[3],"prerelease":sys.argv[4]=="true"}))' \
+    "$TAG" "$VERSION" "Self-update assets for Lodor $VERSION. Devices receive these via the in-app updater (LodorOS) or the store notice (NextUI/muOS)." "$_pre")
+  _rel=$(api POST "/repos/$REPO_SLUG/releases" "$_body") || fail "release create $TAG"
+  _relid=$(printf '%s' "$_rel" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+fi
 
 sh "$ROOT/release/gate.sh" secrets "$OUTDIR" || fail "secrets gate (release out dir)"
 echo "== 3/4 upload assets =="
 for f in "$OUTDIR"/Lodor-LodorOS-update-*-"$VERSION".zip "$OUTDIR/versions.json" "$OUTDIR/versions.json.sig"; do
   [ -f "$f" ] || fail "missing artifact: $f"
+  _n=$(basename "$f")
+  # M5 re-run tolerance: every artifact is rebuilt each run, so a same-name asset from
+  # a previous (possibly interrupted/stale) run is deleted and replaced — never trusted.
+  _aid=$(api GET "/repos/$REPO_SLUG/releases/$_relid/assets?per_page=100" \
+    | python3 -c 'import json,sys
+n=sys.argv[1]
+for a in json.load(sys.stdin):
+    if a.get("name")==n: print(a["id"]); break' "$_n" 2>/dev/null || true)
+  if [ -n "$_aid" ]; then
+    echo "  replacing existing asset: $_n (id $_aid)"
+    api DELETE "/repos/$REPO_SLUG/releases/assets/$_aid" || fail "stale-asset delete: $_n"
+  fi
   _ct="application/zip"; case "$f" in *.json) _ct="application/json";; *.sig) _ct="text/plain";; esac
   curl -sfS -X POST -H "Authorization: Bearer $TOK" -H "Content-Type: $_ct" \
     --data-binary @"$f" \
-    "https://uploads.github.com/repos/$REPO_SLUG/releases/$_relid/assets?name=$(basename "$f")" >/dev/null \
-    || fail "asset upload: $(basename "$f")"
-  echo "  uploaded: $(basename "$f")"
+    "https://uploads.github.com/repos/$REPO_SLUG/releases/$_relid/assets?name=$_n" >/dev/null \
+    || fail "asset upload: $_n"
+  echo "  uploaded: $_n"
 done
 
 echo "== 4/4 dispatch publish-versions workflow (live verify + gh-pages) =="

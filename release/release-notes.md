@@ -1,11 +1,12 @@
-# LodorOS 0.9.7.9
+# LodorOS 0.9.7.10
 
-Multi-disc, done right — plus self-signed server support.
+Stability release — a full-codebase bug sweep with fixes across every lane.
 
 ## What changed
-- **Multi-disc games start after one disc.** Launching a multi-disc game now downloads only the disc you need and gets you playing; the rest arrive quietly in the background while the device charges. Reach a disc swap before it's fetched? Relaunch grabs the next disc. Games you never launch cost zero card space. (Previously a 4-disc game downloaded everything before you could start.)
-- **Self-signed HTTPS servers can now onboard from the device.** If your server's certificate can't be verified, the setup wizard says so plainly and offers "Trust this server" — only for your own server — instead of failing with a misleading error.
-- **The version on screen is now the version on the card.** Updates stamp the system version display, which previously showed the card's original version forever.
+- **Multi-disc fixes:** playlists written on Windows (CRLF line endings) or carrying `#` comments no longer block fully-downloaded games from launching; Android now completes multi-disc sets like every other platform (next-disc fetch on launch, background prefetch while charging); interrupted disc downloads resume instead of restarting.
+- **Sync reliability:** background sync can no longer be interrupted mid-transfer by a second sync starting (and a busy sync is now reported honestly instead of as a Wi-Fi failure); user profiles created on Tailscale/Cloudflare setups now inherit the connection route and follow server-address changes; "no save yet" is no longer reported as "couldn't reach the server."
+- **Durability:** profile selection, settings, and ES-DE configuration files now survive power loss mid-write; restoring a save that fails now says so instead of pretending it worked.
+- **Android launch fixes:** rapid back-to-back game launches no longer race each other (stale downloads, wrong-game launches, missed save pushes, and a crash on backing out mid-check are all fixed).
 
 ## Install / update
 Existing devices: **Update Lodor** (LodorOS) or the store update (NextUI/muOS/Knulli). Config, saves, and ROMs are preserved.

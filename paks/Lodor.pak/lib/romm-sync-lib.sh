@@ -501,7 +501,7 @@ nameserver 8.8.8.8"
 # re-enum gamble / the warm-wedge auto re-enum. None of them cycled the radio in a way that helped; all
 # of them risked dropping a working link.
 _WIFI_LOCK="/tmp/romm-wifi.lock"
-_WIFI_STALE=180                            # a held lock older than this (s) with a dead/absent owner is reclaimable
+_WIFI_STALE=180                            # age tiebreak: only consulted when owner liveness is inconclusive (unparseable pid)
 _WIFI_DBG="${WIFI_DBG:-$SDCARD/Tools/$PLAT/Lodor.pak/wifi-debug.log}"
 _wlog() { echo "$(date +'%F %T') pid=$$ $1" >> "$_WIFI_DBG" 2>/dev/null; }
 # --- HONEST, VERIFIED status line (the source of truth) ----------------------
@@ -559,11 +559,17 @@ _radio_ready() {
 		*)     return 0 ;;
 	esac
 }
-# True while a LIVE, fresh actor holds the mutex (a stale/dead lock is treated as free).
+# True while a LIVE actor holds the mutex (a dead/absent-owner lock is treated as free).
+# Mirrors wifi_acquire's reclaim rule: liveness decides; age is a tiebreak only when the
+# owner pid is unparseable (kill -0 inconclusive).
 _actor_active() {
 	[ -d "$_WIFI_LOCK" ] || return 1
 	o=$(cat "$_WIFI_LOCK/owner" 2>/dev/null); t=$(cat "$_WIFI_LOCK/ts" 2>/dev/null || echo 0); n=$(date +%s)
-	[ -n "$o" ] && kill -0 "$o" 2>/dev/null && [ $((n - t)) -le "$_WIFI_STALE" ]
+	case "$o" in
+		'') return 1 ;;
+		*[!0-9]*) [ $((n - t)) -le "$_WIFI_STALE" ] ;;
+		*) kill -0 "$o" 2>/dev/null ;;
+	esac
 }
 
 # wifi_acquire [mode]   mode: fg = foreground (download / pre-game pull): PREEMPTS a preemptible holder,
@@ -590,7 +596,16 @@ wifi_acquire() {
 		fi
 		owner=$(cat "$_WIFI_LOCK/owner" 2>/dev/null)
 		ts=$(cat "$_WIFI_LOCK/ts" 2>/dev/null || echo 0); now=$(date +%s)
-		if [ -z "$owner" ] || ! kill -0 "$owner" 2>/dev/null || [ $((now - ts)) -gt "$_WIFI_STALE" ]; then
+		# Reclaim ONLY a dead/absent owner. A LIVE holder keeps the mutex no matter how old
+		# its ts is (long downloads are legitimate — revoking a live holder mid-transfer was
+		# the bug). Age is a tiebreak ONLY when kill -0 can't answer (unparseable owner pid).
+		_reclaim=0
+		case "$owner" in
+			'') _reclaim=1 ;;                                                   # absent owner
+			*[!0-9]*) [ $((now - ts)) -gt "$_WIFI_STALE" ] && _reclaim=1 ;;     # unparseable: age tiebreak
+			*) kill -0 "$owner" 2>/dev/null || _reclaim=1 ;;                    # parseable: liveness decides
+		esac
+		if [ "$_reclaim" = 1 ]; then
 			rm -f "$_WIFI_LOCK/owner" "$_WIFI_LOCK/ts" "$_WIFI_LOCK/preempt" 2>/dev/null
 			rmdir "$_WIFI_LOCK" 2>/dev/null
 			continue   # retry the atomic mkdir; if we lose, we re-evaluate the new owner
@@ -687,6 +702,14 @@ wifi_release() {
 		rm -f "$_WIFI_LOCK/owner" "$_WIFI_LOCK/ts" "$_WIFI_LOCK/preempt" 2>/dev/null
 		rmdir "$_WIFI_LOCK" 2>/dev/null
 	fi
+	return 0
+}
+
+# wifi_lock_refresh — bump the held lock's ts (owner-scoped; no-op otherwise). Long-cycle
+# holders (the daemon between engine calls) call this so a reader that can't verify our
+# liveness (unparseable-owner tiebreak) never mistakes a working holder for a stale one.
+wifi_lock_refresh() {
+	[ "$(cat "$_WIFI_LOCK/owner" 2>/dev/null)" = "$$" ] && date +%s > "$_WIFI_LOCK/ts" 2>/dev/null
 	return 0
 }
 

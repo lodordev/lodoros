@@ -20,6 +20,9 @@ LOG="$PAKDIR/update.log"
 [ -d "$UPD/tree" ] || { rm -rf "$UPD"; exit 0; }   # half-staged (no READY-worthy tree): discard
 
 VER="$(sed -n 's/^version=//p' "$UPD/READY" 2>/dev/null | head -1)"
+# Capture the staged sha NOW: READY is deleted (rm -rf "$UPD") before the version.txt
+# stamp below runs — reading it there yielded "" forever (line 2 was always "updated").
+SHA="$(sed -n 's/^sha=//p' "$UPD/READY" 2>/dev/null | head -1)"
 echo "$(date '+%F %T') applying staged update${VER:+ ($VER)}" >> "$LOG"
 
 # The LAUNCHER is never touched from this path — minui swaps are the sentinel-guarded A/B
@@ -43,8 +46,7 @@ if cp -r "$UPD/tree/." "$SDCARD/" >> "$LOG" 2>&1; then
 # written at card build, so devices displayed their BIRTH version forever (found
 # 2026-07-10: a card showed 0.9.7.3 through two successful updates).
 if [ -n "$VER" ] && [ -f "$SDCARD/.system/version.txt" ]; then
-	_sha="$(sed -n 's/^sha=//p' "$UPD/READY" 2>/dev/null | head -1)"
-	printf 'LodorOS-%s\n%s\n' "$VER" "${_sha:-updated}" > "$SDCARD/.system/version.txt.new" \
+	printf 'LodorOS-%s\n%s\n' "$VER" "${SHA:-updated}" > "$SDCARD/.system/version.txt.new" \
 		&& mv "$SDCARD/.system/version.txt.new" "$SDCARD/.system/version.txt" || true
 fi
 	echo "$(date '+%F %T') update applied${VER:+ -> $VER}" >> "$LOG"
