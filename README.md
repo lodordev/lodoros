@@ -1,10 +1,20 @@
 # LodorOS
 
-A self-hosted, RomM-backed console OS for the **Miyoo Mini Flip**. LodorOS is a fork of
-[MinUI](https://github.com/shauninman/MinUI) that turns the Flip into a front-end for your own
+A self-hosted, RomM-backed console OS for **Miyoo handhelds**. LodorOS is a fork of
+[MinUI](https://github.com/shauninman/MinUI) that turns the device into a front-end for your own
 [RomM](https://github.com/rommapp/romm) server: your entire library shows up as zero-byte stubs,
 games download the moment you launch them, and saves sync back to the server around every session —
 all driven by the CGO-free [Lodor engine](https://github.com/lodordev/lodor).
+
+**Supported devices** (one full-card image covers both platforms):
+
+| Device | MinUI platform | Arch |
+|---|---|---|
+| Miyoo Mini Plus / Miyoo Mini Flip | `miyoomini` | ARMv7 |
+| Miyoo Flip V2 | `my355` | arm64 |
+
+The Miyoo A30 (`my282`) lane shipped through 0.9.8.1 and is retired from current builds — existing
+A30 cards keep working (including save sync) but no longer receive LodorOS updates.
 
 It's the flagship build of the Lodor project (the engine and its per-CFW ports live in separate
 repos).
@@ -57,15 +67,17 @@ ARMv7 and place it in `Lodor.pak/`.
 
 ## Build & install
 
-- `launcher/minui.c` is built against MinUI's toolchain for the `miyoomini` platform (it replaces
-  MinUI's `minui.elf`).
-- Build the Lodor engine for ARMv7 and drop the binary into the pak; copy the pak under
-  `Tools/miyoomini/` on the card.
+- `launcher/minui.c` is built against MinUI's toolchain per platform (`miyoomini` and `my355`); it
+  replaces MinUI's `minui.elf`.
+- Build the Lodor engine for the platform's arch (static ARMv7 for `miyoomini`, arm64 for `my355`)
+  and drop the binary into the pak; copy the pak under `Tools/<platform>/` on the card.
 - Boot, run the onboarding wizard, and your library mirrors in.
+- Easiest path: grab the release **full-card image** (fresh install) or run **Update Lodor** on a
+  device that already has LodorOS — the release pipeline builds both platforms.
 
 ## Status
 
-Built and daily-driven on the Miyoo Mini Flip. Onboarding, the stub-mirror library, fetch-on-launch
+Built and daily-driven on the Miyoo Mini Flip; the arm64 lane runs the Miyoo Flip V2. Onboarding, the stub-mirror library, fetch-on-launch
 (incl. multi-disc PS1), save sync, the Continue tile, background sync, the Wi-Fi keep-up + auto-recovery
 rearchitecture, and Flashback (both the library menu and the in-game pause menu) are verified on
 hardware. Known limitation: Flashback is currently **online** — its timeline is read from the server,
