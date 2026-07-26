@@ -19,6 +19,19 @@ A30 cards keep working (including save sync) but no longer receive LodorOS updat
 It's the flagship build of the Lodor project (the engine and its per-CFW ports live in separate
 repos).
 
+## Current release
+
+**1.0.0-alpha1** — the first public alpha of the 1.0 line. Early on purpose: expect rough edges and report them.
+
+**Already running LodorOS?** Use **Update Lodor** on the device. Pairing, saves, and ROMs are preserved.
+
+**Fresh install?** This alpha does **not** ship a full-card image. Flash the most recent full card from an
+earlier release, then run **Update Lodor** to reach 1.0.0-alpha1.
+
+- [Release notes and downloads](https://github.com/lodordev/lodoros/releases/tag/v1.0.0-alpha1)
+
+These 1.0 releases are marked **pre-release** on GitHub, so this repo's *Latest release* badge still points at the last stable (`0.9.8.1`). That is deliberate.
+
 ## What it does
 
 - **Onboard to your server** — a native first-run wizard: Wi-Fi → server address → 8-digit RomM pair
