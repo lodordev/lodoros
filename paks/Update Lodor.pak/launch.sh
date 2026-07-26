@@ -288,7 +288,7 @@ if [ "$_acq" != 0 ]; then ui_sticky "Couldn't reach the update server — check 
 set_clock || log "clock set failed - continuing"
 
 ui_hold checking-updates "Checking for updates..."
-OUT="$("$SYNC_BIN" --check-update 2>>"$LOG")"; RC=$?
+OUT="$(LODOR_UPDATE_ASSET="lodoros-$PLAT" "$SYNC_BIN" --check-update 2>>"$LOG")"; RC=$?
 log "check-update rc=$RC: $OUT"
 if [ "$RC" != 0 ]; then
 	# exit 3 = manifest unreachable/unusable. DISTINCT, sticky message — never a silent exit

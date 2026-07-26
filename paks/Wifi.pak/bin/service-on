@@ -215,15 +215,14 @@ main() {
             echo "Failed to start wpa_supplicant"
             return 1
         fi
-        # Harden association (8188fu / nl80211): kill power-save, then WAIT for the
-        # link to authenticate before DHCP. On timeout/drop do ONE re-enum + wpa
-        # restart, then try once more -- never loop (8188fu wedge).
-        _wifi_power_save_off
-        if ! _wifi_wait_assoc; then
-            _wifi_reenum_once
-            /etc/init.d/wpa_supplicant start || true
-            _wifi_wait_assoc || echo "my282: association incomplete; starting udhcpc anyway"
-        fi
+        # PLAIN upstream minui-wifi-pak bring-up (josegonzalez, restored 2026-07-12).
+        # Our round-3 association-hardening (power-save toggle + wait-for-assoc +
+        # re-enum retry) was bolted in front of this line and is the suspected cause of
+        # the DHCP DISCOVER->no-OFFER leasefail: it delayed/perturbed the interface so
+        # the busybox default udhcpc never got an OFFER. Upstream fires udhcpc
+        # immediately, backgrounded, with NO wait -- proven on the A30. DNS (resolv.conf)
+        # is handled SEPARATELY in our wrapper (Lodor.pak/lib/romm-sync-lib.sh
+        # _ensure_resolv), never here -- the vendored pak stays pristine.
         ( (udhcpc -i wlan0 -q &) &)
     elif [ "$PLATFORM" = "my355" ]; then
         killall -9 wpa_supplicant || true

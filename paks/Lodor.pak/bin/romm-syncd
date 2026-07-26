@@ -194,13 +194,23 @@ while :; do
 				log "sync rc=$rc (retry next interval)"
 			fi
 		else
+			# MANAGED RECONCILE on the off-charge flush too (wired 2026-07-22): the Flip is
+			# rarely charging, so this flush is where its saves actually reach the server in
+			# practice — and the pending queue misses any save whose quit was a power-off/
+			# lid-close (the shim's quit hook dies with it; the FF6 postmortem). Reconcile
+			# diffs the whole save tree; the queue flush still runs to drain/clear the badge
+			# and stays the whole sync on RomM < 5 (reconcile rc 2). Real reconcile failures
+			# (rc >= 3) surface in the flush log line.
+			run_sync --reconcile-library >> "$LOG" 2>&1; rec_rc=$?
+			wifi_lock_refresh
 			run_sync --push-pending >> "$LOG" 2>&1; rc=$?
+			[ "$rec_rc" -ge 3 ] && [ "$rec_rc" -gt "$rc" ] && rc=$rec_rc
 			wifi_lock_refresh
 			# Save-STATES (task: los-statesync): also drain any queued STATES on the off-charge
 			# flush so a state made off-charge reaches RomM without waiting to plug in. Best-effort.
 			run_sync --push-pending-states >> "$LOG" 2>&1 || true
 			wifi_release
-			log "flush rc=$rc (off-charge pending save + state push)"
+			log "flush rc=$rc (off-charge reconcile + pending save + state push)"
 		fi
 	else
 		log "wifi up but no usable link; back off"   # acq=1

@@ -14,10 +14,14 @@
 #   4. dispatch the publish-versions workflow (which does the live verify + gh-pages commit)
 set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-OUTDIR=${1:?usage: publish-updates.sh <release-out-dir> [--beta]}
+OUTDIR=${1:?usage: publish-updates.sh <release-out-dir> [--beta] [--retire <asset-key>]...}
 shift
-BETA=""
-[ "${1:-}" = "--beta" ] && BETA="--beta"
+BETA=""; RETIREARGS=""
+while [ $# -gt 0 ]; do case "$1" in
+  --beta)   BETA="--beta"; shift;;
+  --retire) RETIREARGS="$RETIREARGS --retire $2"; shift 2;;
+  *) echo "publish-updates: unknown arg $1" >&2; exit 2;;
+esac; done
 # When a NextUI pak is published in the SAME release event, pass its version so the
 # self-update manifest can advance notify.nextui honestly (else it is preserved from base).
 NEXTUI_ARG=""
@@ -49,8 +53,9 @@ else
   echo "  no live manifest yet (first publish) - starting fresh"
 fi
 # shellcheck disable=SC2086
-sh "$ROOT/release/mkversions.sh" "$OUTDIR" $BETA $BASEARG $NEXTUI_ARG
-sh "$ROOT/release/gate.sh" update-manifest "$OUTDIR/versions.json" "$TAG" || fail "update-manifest gate"
+sh "$ROOT/release/mkversions.sh" "$OUTDIR" $BETA $BASEARG $NEXTUI_ARG $RETIREARGS
+CHANNEL=$([ -n "$BETA" ] && echo beta || echo stable)
+sh "$ROOT/release/gate.sh" update-manifest "$OUTDIR/versions.json" "$TAG" "$CHANNEL" || fail "update-manifest gate"
 
 # Sign the manifest with the OFFLINE ed25519 key (security HIGH #4): devices
 # verify this signature before trusting any hash. Signing runs AFTER the gate so

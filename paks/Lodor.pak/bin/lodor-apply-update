@@ -87,6 +87,24 @@ logln "applying staged update${VER:+ ($VER)}"
 # flow's job (separate, later). Strip any launcher bytes a mis-built asset might carry.
 rm -rf "$UPD/tree/.system/$PLAT/bin/minui" "$UPD/tree/.system"/*/bin/minui 2>/dev/null
 
+# ---- deprecated paks (1.0): paks the NEW version no longer ships and this update must DELETE.
+# The overlay copy only ADDS/REPLACES, so a migration that drops a pak (e.g. GBA->mGBA retiring
+# Emus/*/MGBA.pak) would otherwise linger on every OTA-upgraded card forever. The list ships in
+# the staged tree; expand each (glob-capable, card-relative) entry against what is actually here.
+DEP_PATHS=""
+_deplist="$UPD/tree/Tools/$PLAT/Lodor.pak/deprecated-paks.txt"
+if [ -f "$_deplist" ]; then
+	while IFS= read -r _entry; do
+		_entry="$(printf '%s' "$_entry" | sed -e 's/#.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+		[ -n "$_entry" ] || continue
+		for _p in $SDCARD/$_entry; do          # unquoted: glob-expanded against the card
+			[ -e "$_p" ] || continue           # unmatched glob stays literal -> skip
+			DEP_PATHS="$DEP_PATHS${_p#$SDCARD/}
+"
+		done
+	done < "$_deplist"
+fi
+
 # ---- rollback staging (lodor#47): mirror what this apply will replace, BEFORE the copy.
 # Runs AFTER the minui strip so only files that will actually be overlaid are captured.
 # The rolled-from version comes from the OS version stamp, falling back to the last-applied
@@ -111,6 +129,16 @@ else
 		_dst="$RBSET/tree/$(dirname "$_rel")"
 		mkdir -p "$_dst" && cp "$SDCARD/$_rel" "$_dst/" || { : > "$RB/stage-failed"; break; }
 	done
+	# Also mirror the DEPRECATED paks this apply will DELETE, so a revert restores them.
+	if [ ! -f "$RB/stage-failed" ]; then
+		printf '%s' "$DEP_PATHS" | while IFS= read -r _dp; do
+			[ -n "$_dp" ] || continue
+			( cd "$SDCARD" 2>/dev/null && find "$_dp" -type f 2>/dev/null ) | while IFS= read -r _df; do
+				_ddst="$RBSET/tree/$(dirname "$_df")"
+				mkdir -p "$_ddst" && cp "$SDCARD/$_df" "$_ddst/" || { : > "$RB/stage-failed"; break; }
+			done
+		done
+	fi
 	if [ -f "$RB/stage-failed" ]; then
 		# Best-effort insurance failed (card full?): a HALF mirror must never be restorable —
 		# the update still applies, it just can't offer a revert.
@@ -134,6 +162,12 @@ if cp -r "$UPD/tree/." "$SDCARD/" >> "$LOG" 2>&1; then
 	# install.sh is idempotent by contract: re-chmods the pak, re-swaps the minarch shim from
 	# the (possibly updated) template, re-asserts the auto.sh lines.
 	sh "$PAKDIR/install.sh" >> "$LOG" 2>&1
+	# Delete deprecated paks the new version dropped (bytes preserved in the rollback mirror
+	# above). This is the ONLY delete path in the applier — the overlay copy never removes.
+	printf '%s' "$DEP_PATHS" | while IFS= read -r _dp; do
+		[ -n "$_dp" ] || continue
+		rm -rf "$SDCARD/$_dp" && logln "removed deprecated pak: $_dp"
+	done
 	rm -rf "$UPD"
 	[ -n "$VER" ] && printf '%s\n' "$VER" > "$PAKDIR/.update-applied" 2>/dev/null
 	# Stamp the OS-visible version (.system/version.txt) so the launcher's MENU/About

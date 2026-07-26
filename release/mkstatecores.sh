@@ -42,8 +42,8 @@ while [ $# -gt 0 ]; do case "$1" in
 esac; done
 
 case "$FRONTEND" in
-	lodoros|nextui|muos|knulli|onion) ;;
-	*) echo "mkstatecores: --frontend must be lodoros|nextui|muos|knulli|onion (got '$FRONTEND')" >&2; exit 2;;
+	lodoros|nextui|muos|knulli|onion|spruce) ;;
+	*) echo "mkstatecores: --frontend must be lodoros|nextui|muos|knulli|onion|spruce (got '$FRONTEND')" >&2; exit 2;;
 esac
 case "$ARCH" in
 	armhf|arm64) ;;

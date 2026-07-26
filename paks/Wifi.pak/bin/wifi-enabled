@@ -15,9 +15,6 @@ export LD_LIBRARY_PATH="$PAK_DIR/lib/$PLATFORM:$PAK_DIR/lib:$LD_LIBRARY_PATH"
 
 main() {
     SYSTEM_JSON_PATH="/mnt/UDISK/system.json"
-    if [ "$PLATFORM" = "my282" ]; then
-        SYSTEM_JSON_PATH="/config/system.json"
-    fi
     if [ "$PLATFORM" = "my355" ]; then
         SYSTEM_JSON_PATH="/userdata/system.json"
     fi

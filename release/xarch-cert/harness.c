@@ -2,6 +2,7 @@
  * save-state certification (Lodor Handoff D8).
  *
  * Modes:
+ *   ./harness <core.so> info                              print core name + version, exit
  *   ./harness <core.so> <rom> gen  <frames> <out.state>   run N frames, serialize
  *   ./harness <core.so> <rom> load <in.state> <out.state> unserialize, re-serialize
  * Exit 0 = success; non-zero = the core refused (that IS the verdict, not an error).
@@ -18,6 +19,8 @@ enum { SET_PIXEL_FORMAT = 10, GET_SYSTEM_DIRECTORY = 9, GET_SAVE_DIRECTORY = 31,
        GET_VARIABLE_UPDATE = 17 };
 struct retro_game_info { const char *path; const void *data; size_t size; const char *meta; };
 struct retro_system_av_info { char pad[512]; };
+struct retro_system_info { const char *library_name; const char *library_version;
+                           const char *valid_extensions; bool need_fullpath; bool block_extract; };
 
 static const char *tmpdir = "/tmp";
 static bool env_cb(unsigned cmd, void *data) {
@@ -39,9 +42,29 @@ static int16_t input_state_cb(unsigned a, unsigned b, unsigned c, unsigned d) { 
 #define SYM(name) name = dlsym(h, #name); if (!name) { fprintf(stderr, "missing sym %s\n", #name); return 10; }
 
 int main(int argc, char **argv) {
-	if (argc < 6) { fprintf(stderr, "usage: harness core rom gen|load a b\n"); return 2; }
+	if (argc < 3) { fprintf(stderr, "usage: harness core info | harness core rom gen|load a b\n"); return 2; }
 	void *h = dlopen(argv[1], RTLD_LAZY | RTLD_LOCAL);
 	if (!h) { fprintf(stderr, "dlopen: %s\n", dlerror()); return 3; }
+	if (strcmp(argv[2], "info") == 0) {
+		/* some cores (fceumm arm64) segfault on get_system_info before init —
+		 * do the minimal legal bring-up first */
+		void (*retro_set_environment)(bool (*)(unsigned, void *));
+		void (*retro_init)(void);
+		void (*retro_deinit)(void);
+		void (*retro_get_system_info)(struct retro_system_info *);
+		SYM(retro_set_environment) SYM(retro_init) SYM(retro_deinit)
+		SYM(retro_get_system_info)
+		retro_set_environment(env_cb);
+		retro_init();
+		struct retro_system_info si; memset(&si, 0, sizeof si);
+		retro_get_system_info(&si);
+		printf("INFO name=%s version=%s\n",
+		       si.library_name ? si.library_name : "?",
+		       si.library_version ? si.library_version : "?");
+		retro_deinit();
+		return 0;
+	}
+	if (argc < 6) { fprintf(stderr, "usage: harness core rom gen|load a b\n"); return 2; }
 	void (*retro_set_environment)(bool (*)(unsigned, void *));
 	void (*retro_set_video_refresh)(void (*)(const void *, unsigned, unsigned, size_t));
 	void (*retro_set_audio_sample)(void (*)(int16_t, int16_t));

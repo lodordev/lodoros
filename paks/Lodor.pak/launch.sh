@@ -18,6 +18,8 @@ trap 'clear_say; command -v tailscale_down >/dev/null 2>&1 && tailscale_down; wi
 
 log()    { echo "$1" >> "$LOG"; }
 status() { log "$1"; say "$1"; }
+# non-blank line count of a queue file (0 if missing) — mirrors the NextUI lane's count_lines
+count_lines() { if [ -f "$1" ]; then grep -c . "$1" 2>/dev/null; else echo 0; fi; }
 
 [ -x "$SYNC_BIN" ]              || { say "Sync binary missing"; sleep 2; exit 1; }
 [ -x "$WIFI_BIN/service-on" ]   || { say "Wifi.pak not installed"; sleep 2; exit 1; }
@@ -45,7 +47,7 @@ set_setting(){
 maybe_check_update() {
 	_l="$(get_setting update_last_check)"; case "$_l" in ''|*[!0-9]*) _l=0 ;; esac
 	[ $(( $(date +%s) - _l )) -lt 86400 ] && return 0
-	_o="$("$SYNC_BIN" --check-update 2>>"$LOG")" || return 0
+	_o="$(LODOR_UPDATE_ASSET="lodoros-${PLATFORM:-miyoomini}" "$SYNC_BIN" --check-update 2>>"$LOG")" || return 0
 	log "check-update: $_o"
 	set_setting update_last_check "$(date +%s)"
 	_lat="$(printf '%s\n' "$_o" | sed -n 's/.*latest=\([^ ]*\).*/\1/p' | head -1)"
@@ -88,7 +90,19 @@ done
 
 case "$rc" in
 	0) date +%s > /tmp/romm-last-full-sync 2>/dev/null   # full sync: lets session pulls skip
-	   status "RomM: sync complete"
+	   # HONEST STATUS: --push-pending-states is best-effort (|| true) and the engine exits 0
+	   # even when states stay stuck offline, so rc=0 alone can hide a non-empty queue. Read the
+	   # residual queue files directly — the drain rewrites pending-states.txt with what's left.
+	   _psaves=$(count_lines "$PAKDIR/pending-saves.txt")
+	   _pstates=$(count_lines "$PAKDIR/pending-states.txt")
+	   if [ "$_psaves" -gt 0 ] || [ "$_pstates" -gt 0 ]; then
+	   	_q=""
+	   	[ "$_psaves" -gt 0 ] && _q="$_psaves save(s)"
+	   	[ "$_pstates" -gt 0 ] && _q="${_q:+$_q, }$_pstates state(s)"
+	   	status "RomM: synced, $_q still queued (offline)"
+	   else
+	   	status "RomM: sync complete"
+	   fi
 	   maybe_check_update ;;
 	2) status "RomM: not configured" ;;
 	3) status "RomM: server unreachable" ;;

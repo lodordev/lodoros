@@ -12,6 +12,9 @@
 #     --base     merge into an existing manifest (fetch the live one first — a beta release
 #                must never clobber stable). Absent: start a fresh schema-1 skeleton.
 #     --notes    release notes file; first line becomes the channel notes (single-line contract)
+# Retirement: asset keys listed in release/retired-lanes.txt are dropped from every channel
+# (#20) — a lane that left the build must leave the manifest too, or merge-forward (#19)
+# re-advertises its stale asset and the tag gate aborts every publish.
 # Output: <out-dir>/versions.json
 set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -29,10 +32,10 @@ VERSION=$(cat "$ROOT/VERSION" 2>/dev/null || true)
 [ -n "$VERSION" ] || { echo "mkversions: VERSION missing" >&2; exit 1; }
 [ -d "$OUTDIR" ] || { echo "mkversions: no such out dir: $OUTDIR" >&2; exit 1; }
 
-python3 - "$OUTDIR" "$VERSION" "$CHANNEL" "$BASE" "$NOTES_FILE" "$NEXTUI_VER" <<'PY'
+python3 - "$OUTDIR" "$VERSION" "$CHANNEL" "$BASE" "$NOTES_FILE" "$NEXTUI_VER" "$ROOT/release/retired-lanes.txt" <<'PY'
 import json, os, sys, glob, re
 
-outdir, version, channel, base, notes_file, nextui_ver = sys.argv[1:7]
+outdir, version, channel, base, notes_file, nextui_ver, retired_file = sys.argv[1:8]
 TAG_URL = f"https://github.com/lodordev/lodor/releases/download/v{version}"
 
 manifest = {"schema": 1}
@@ -95,6 +98,36 @@ if base:
 merged_assets.update(assets)
 
 manifest[channel] = {"version": version, "notes": notes, "assets": merged_assets}
+
+# #20: lane retirement. A lane dropped from the build must ALSO leave the manifest, or #19's
+# merge-forward re-advertises its stale asset forever — pinned to an old release tag, which the
+# per-asset tag gate (gate.sh update-manifest [tag]) rejects, aborting EVERY publish of EVERY
+# lane (the F1/F3 blocker). Keys listed in release/retired-lanes.txt are stripped from every
+# channel here; the freeze-aware engine then reports update=0 on those devices instead of a
+# phantom offer.
+retired = []
+if os.path.exists(retired_file):
+    for line in open(retired_file):
+        line = line.split("#", 1)[0].strip()
+        if line:
+            retired.append(line)
+for key in retired:
+    if key in assets:
+        sys.exit(
+            f"mkversions: {key} is listed in {retired_file} but was BUILT this run — "
+            f"un-retire the lane or drop the artifact; refusing the contradiction"
+        )
+dropped = []
+for ch in ("stable", "beta"):
+    c = manifest.get(ch)
+    if isinstance(c, dict) and isinstance(c.get("assets"), dict):
+        for key in retired:
+            if c["assets"].pop(key, None) is not None:
+                dropped.append(f"{ch}/{key}")
+if not merged_assets:
+    sys.exit("mkversions: retirement emptied the channel's asset map — refusing an empty channel")
+if dropped:
+    print(f"retired from manifest: {', '.join(dropped)}")
 if channel == "stable":
     # notify drives the store-lane "update available" notices (NextUI Pak Store / muOS App
     # Downloader install the actual bits) — they track stable only; beta users opted into

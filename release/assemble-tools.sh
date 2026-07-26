@@ -48,8 +48,8 @@ MINARCH_SRC=${MINARCH_SRC:-}  # dir containing <plat>.minarch
 #   EXCLUDES: gkdpixel + Anbernic RG28XX + original RG35XX (no radio). tg5040 (TrimUI Smart Pro/
 #   Brick), rgb30 (PowKiddy RGB30) and trimuismart (TrimUI Smart) are now FIRST-CLASS LodorOS targets.
 # Miyoo-only (pivot 2026-07-05); LODOR_BUILD_NONMIYOO=1 restores the archived set.
-if [ "${LODOR_BUILD_NONMIYOO:-0}" = 1 ]; then WIFI_PLATFORMS="miyoomini my282 my355 rg35xxplus zero28 magicmini tg5040 rgb30 trimuismart"
-else WIFI_PLATFORMS="miyoomini my282 my355"; fi
+if [ "${LODOR_BUILD_NONMIYOO:-0}" = 1 ]; then WIFI_PLATFORMS="miyoomini my355 rg35xxplus zero28 magicmini tg5040 rgb30 trimuismart"
+else WIFI_PLATFORMS="miyoomini my355"; fi
 # WIFI_ALIASES: device families MinUI serves under ANOTHER platform's binaries+folder via runtime
 #   model detection -> they need NO separate build/folder; listing documents that coverage:
 #   rg40xxcube (Anbernic RG CubeXX, H700) -> runs the rg35xxplus build (is_cubexx flag, 720x720).
@@ -60,8 +60,8 @@ if [ "${LODOR_BUILD_NONMIYOO:-0}" = 1 ]; then WIFI_ALIASES="rg40xxcube:rg35xxplu
 # LAUNCHER_READY: platforms with a current, device-toolchain-built, GATED minui.elf. ONLY these are
 #   assembled — shipping a generic-cross launcher bricks at the loader (the my355 lesson). The rest are
 #   reported as BLOCKED (need a real union-<plat>-toolchain image; an infra job).
-if [ "${LODOR_BUILD_NONMIYOO:-0}" = 1 ]; then LAUNCHER_READY=${LAUNCHER_READY:-"miyoomini my282 my355 rg35xxplus zero28 magicmini"}
-else LAUNCHER_READY=${LAUNCHER_READY:-"miyoomini my282 my355"}; fi
+if [ "${LODOR_BUILD_NONMIYOO:-0}" = 1 ]; then LAUNCHER_READY=${LAUNCHER_READY:-"miyoomini my355 rg35xxplus zero28 magicmini"}
+else LAUNCHER_READY=${LAUNCHER_READY:-"miyoomini my355"}; fi
 # engine arch per platform
 eng_for(){ case "$1" in my355|zero28|magicmini|rgb30|tg5040) echo arm64;; *) echo armhf;; esac; }
 # Reset WiFi.pak recipients (8188fu only)

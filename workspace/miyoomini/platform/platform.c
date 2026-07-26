@@ -206,12 +206,17 @@ static int hasMode(const char *path, const char *mode) {
 
 SDL_Surface* PLAT_initVideo(void) {
 	is_plus = exists("/customer/app/axp_test");
-	// lodor: render native 752x560 on ANY miyoomini-family panel that actually reports that
+	// lodor (2026-07-11, lodoros#22): 560p is OPT-IN via <userdata>/enable-560p, restoring
+	// upstream's guard. One miyoomini build serves the Mini Plus (640x480) AND the Mini Flip
+	// (752x560); the Plus firmware ALSO lists a 752x560p mode, so gating on hasMode() alone
+	// forced the 752-wide UI onto the Plus's 640 panel (text off the right edge). Default = the
+	// panel's native 480p (correct for the Plus). The Flip card image drops the enable-560p marker.
+	// Historical note: the removed comment claimed "render native 752x560 on ANY miyoomini panel that reports it" —
 	// mode (owner decision, locked 2026-06-27). Gate ONLY on real panel capability — never the model
 	// name, never an opt-in flag — so a 752x560 panel is crisp everywhere (launcher + cores) while
 	// a 640x480-only panel (no such mode listed) is untouched and stays 640x480. Safety property:
 	// we never force a mode the panel does not list.
-	is_560p = hasMode(MODES_PATH, "752x560p");
+	is_560p = hasMode(MODES_PATH, "752x560p") && exists(USERDATA_PATH "/enable-560p");
 	LOG_info("is 560p: %i\n", is_560p);
 	
 	putenv("SDL_HIDE_BATTERY=1"); // using MiniUI's custom SDL

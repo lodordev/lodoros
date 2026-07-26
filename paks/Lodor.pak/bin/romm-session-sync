@@ -6,6 +6,9 @@
 
 PHASE="$1"
 ROM="$2"
+# rc5 DIAGNOSTIC: unconditional ENTER trace at the very top (hardcoded path — $PAK not computed yet), so
+# we can tell whether this helper is even EXEC'd by the shim's timeout call, independent of the guards below.
+echo "$(date '+%F %T') [session-sync] ENTER phase=$PHASE rom=$ROM" >> "/mnt/SDCARD/Tools/miyoomini/Lodor.pak/session.log" 2>/dev/null
 [ -n "$PHASE" ] && [ -n "$ROM" ] || exit 0
 
 SDCARD="${SDCARD_PATH:-/mnt/SDCARD}"
@@ -15,6 +18,10 @@ WIFI_LOG="$PAK/session.log"
 
 . "$PAK/lib/romm-sync-lib.sh" 2>/dev/null || exit 0
 SESSION_LOG="$PAK/session.log"
+# rc4 DIAGNOSTIC (2026-07-24): unconditional trace — session.log is ALWAYS created if this helper runs
+# at all, showing the phase + whether the wizard guard passes with -x vs -f (the FAT32 exec-bit test).
+# If session.log stays ABSENT after this, the SHIM never invoked the helper (look at minarch-shim.sh).
+echo "$(date '+%F %T') [session-sync] phase=$PHASE rom=$ROM wiz_x=$([ -x "$PAK/lodor-wizard" ] && echo 1 || echo 0) wiz_f=$([ -f "$PAK/lodor-wizard" ] && echo 1 || echo 0)" >> "$SESSION_LOG" 2>/dev/null
 
 # Always power the radio down if we're killed (e.g. the shim caps the pull with `timeout`, or OOM).
 # wifi_release is owner-safe → no-ops unless we hold it.
@@ -47,13 +54,56 @@ if [ "$PHASE" = "report" ]; then
 	exit 0
 fi
 
-if [ "$PHASE" = "pull" ]; then
-	# Skip the pre-game pull if a full sync already refreshed everything recently.
-	now=$(date +%s); last=$(cat /tmp/romm-last-full-sync 2>/dev/null || echo 0)
-	if [ $((now - last)) -lt "${ROMM_SYNC_INTERVAL:-1800}" ]; then
-		echo "$(date +'%F %T') [pull] skipped (fresh) rom=$ROM" >> "$SESSION_LOG"
-		exit 0
+# rc5: format-agnostic timeout (busybox arg format varies; a wrong-format `timeout` silently fails to
+# launch the wizard — the same bug class as the shim's card call). Falls back to unbounded if neither works.
+_lodor_timeout() {
+	_lt_s=$1; shift
+	if timeout 1 true 2>/dev/null; then timeout "$_lt_s" "$@"
+	elif timeout -t 1 true 2>/dev/null; then timeout -t "$_lt_s" "$@"
+	else "$@"; fi
+}
+
+# _show_launch_card — draw the interactive launch card. Shared by the warm "pull" path and the
+# offline "card" path so the fb-activate/SDL wiring never drifts. Brings up NO radio of its own; the
+# wizard reads local info and degrades to "server unreachable - local info" when offline.
+_show_launch_card() {
+	[ -f "$PAK/lodor-wizard" ] || return 0   # rc4: -f not -x — FAT32 drops the exec bit; the file is run directly regardless
+	_lcenv=""
+	if [ "$PLAT" = miyoomini ]; then
+		# miyoomini (SSD202D): raw /dev/fb0 is a DEAD scanout surface for a standalone (post-SDL_Quit)
+		# process — the wizard's raw-fb lane reports `reason=no-fb` because OpenFramebuffer fails before
+		# the fb-activate recipe can even run. The SDL 1.2 helper (lodor-fbhelper, MI_GFX — minui's OWN
+		# proven scanout path, mirrors how NextUI renders the card) is the DEFAULT here. Gate on the
+		# helper binary's PRESENCE with -f, NOT -x: FAT32/exFAT drops the exec bit (same reason the wizard
+		# guard at the top of this function uses -f), so an -x test would silently never activate SDL even
+		# with the binary present. Fall back to the raw-fb lane only if the helper is missing from the pak.
+		if [ -f "$PAK/bin/lodor-fbhelper" ]; then
+			_lcenv="LODOR_FBHELPER=$PAK/bin/lodor-fbhelper LODOR_SPIKE_W=640 LODOR_SPIKE_H=480"
+		else
+			_lcenv="LODOR_FB_FORCEMODE_W=640 LODOR_FB_FORCEMODE_H=480"
+		fi
 	fi
+	# rc6: _lodor_timeout is a SHELL FUNCTION — it must be the command word (env execs an external
+	# program, so `env … _lodor_timeout …` fails "can't execute"). So: _lodor_timeout runs `env`, which
+	# sets the vars and execs the wizard (a real binary), all bounded by the format-correct timeout.
+	_lodor_timeout 90 env LODOR_HOST_OS=lodoros LODOR_BIN="$PAK/lodor-sync" $_lcenv \
+		"$PAK/lodor-wizard" --launch-card --summoned "$ROM" >> "$SESSION_LOG" 2>&1 || true
+}
+
+# CARD phase — CACHE-FIRST launch card when WiFi is DOWN (the shim picks this on a cold launch so the
+# card STILL shows). Render from local cache with NO wifi_acquire — the radio is never cold-brought-up.
+if [ "$PHASE" = "card" ]; then
+	_ensure_resolv
+	_show_launch_card
+	exit 0
+fi
+
+if [ "$PHASE" = "pull" ]; then
+	# NO freshness gate (sync v2, decision 2026-07-16): the pre-game pull ALWAYS runs so a
+	# launch is current on every play, regardless of when the background daemon last synced.
+	# The old 30-min /tmp/romm-last-full-sync skip made "current on every launch" unreliable
+	# (2026-07-15 overnight QA) and is deleted, not tuned — the per-game launch bracket is the
+	# only moment that must be right, and it is cheap (a no-op when the save is unchanged).
 	NET_TIMEOUT=6   # fail fast pre-game; the daemon owns the patient path
 fi
 
@@ -77,17 +127,23 @@ if wifi_acquire "$_ACQ"; then
 		# drain any states queued from offline stops.
 		run_sync --push-states "$ROM" >> "$SESSION_LOG" 2>&1 || true
 		run_sync --push-pending-states >> "$SESSION_LOG" 2>&1 || true
-	elif [ -x "$PAK/lodor-wizard" ]; then
-		# Launch gate (Handoff, task #24 - 2026-07-07): the wizard probes
-		# for anything NEWER (save lineage; unseen compatible state) and shows the
-		# interactive launch card ONLY then - silent pass-through otherwise. Wizard
-		# not shipped in this pak build -> the old silent sync below (honest
-		# degradation; release.sh only started bundling it post-0.9.6). resolv +
-		# tier-1 prep first: the wizard's engine probes bypass run_sync's plumbing.
+	elif [ -f "$PAK/lodor-wizard" ]; then
+		# Launch gate (Handoff, task #24 - 2026-07-07; ALWAYS-SHOW launch-card-v2 2026-07-12):
+		# the wizard shows the FULL interactive launch card on EVERY launch (--summoned, matching
+		# NextUI + muOS + Knulli) - the old smart (news-only) silence is gone so behavior is
+		# uniform across the fleet. Wizard not shipped in this pak build -> the old silent sync
+		# below (honest degradation; release.sh only started bundling it post-0.9.6). Any wizard
+		# failure (fb / input / probe error / 90s timeout) falls through to launch, never a
+		# blocked/dead screen (the wizard itself always exits 0; the `|| true` is a second belt).
+		# resolv + tier-1 prep first: the wizard's engine probes bypass run_sync's plumbing.
+		# LODOR_HOST_OS=lodoros selects the DEFAULT evdev keymap (miyoomini + my355 are Xbox/SDL
+		# layout, A=304/B=305 - NOT the H700 swap) and marks native-state dimming.
+		# Warm-link launch card (WiFi already up): tier-1 + the live server saves/states path work.
+		# The card itself is drawn by _show_launch_card, shared with the offline "card" phase so the
+		# render wiring stays single-sourced.
 		_ensure_resolv
 		lodor_tier1_up
-		LODOR_BIN="$PAK/lodor-sync" \
-			timeout 90 "$PAK/lodor-wizard" --launch-card "$ROM" >> "$SESSION_LOG" 2>&1 || true
+		_show_launch_card
 		rc=0
 	else
 		run_sync --sync-save "$ROM" >> "$SESSION_LOG" 2>&1

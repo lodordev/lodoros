@@ -1,0 +1,10 @@
+# deprecated-paks.txt — paks the current LodorOS no longer ships that the OTA applier must
+# DELETE from an upgrading card. The overlay copy only ADDS/REPLACES, so without this a dropped
+# pak lingers forever: the GBA->mGBA migration left a duplicate Emus/*/MGBA.pak on every card
+# already flashed, invisible to every OTA update.
+#
+# Consumed at boot by lodoros/paks/Lodor.pak/bin/lodor-apply-update (from the STAGED tree, so the
+# NEW version declares what it dropped). One card-relative path per line; '#' comments; globs (*)
+# allowed and expanded against the card. Each removed pak's bytes are mirrored into the rollback
+# set first, so "Revert last update" restores it. A path matching nothing is a silent no-op.
+Emus/*/MGBA.pak

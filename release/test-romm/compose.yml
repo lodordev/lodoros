@@ -1,0 +1,42 @@
+# release/test-romm — DISPOSABLE RomM for hermetic lane e2e (never production).
+# Image tag PINNED (5.x auth surface differs from 4.x — harnesses assume 5.0.0 semantics).
+# No metadata-provider keys on purpose: scan populates from filesystem only, zero egress.
+#
+# BIND ADDRESS: loopback by default. ROMM_TEST_BIND is set by up.sh — plain
+# `docker compose up` keeps 127.0.0.1. LAN mode (192.168.50.120) exists SOLELY for
+# the Crookshanks AVD e2e leg (integrations/android/test/avd-e2e.sh); see up.sh header.
+services:
+  test-romm:
+    image: rommapp/romm:5.0.0
+    container_name: lodor-test-romm
+    environment:
+      - DB_HOST=test-romm-db
+      - DB_NAME=romm
+      - DB_USER=romm
+      - DB_PASSWD=romm-test-pw
+      - ROMM_AUTH_SECRET_KEY=${ROMM_TEST_SECRET:?run via up.sh}
+      - ENABLE_SCHEDULED_RESCAN=true
+      - SCHEDULED_RESCAN_CRON=* * * * *
+    ports:
+      - "${ROMM_TEST_BIND:-127.0.0.1}:8998:8080"
+    volumes:
+      - ./volumes/resources:/romm/resources
+      - ./volumes/assets:/romm/assets
+      - ./volumes/config:/romm/config
+      - ./library:/romm/library
+    depends_on:
+      test-romm-db:
+        condition: service_healthy
+  test-romm-db:
+    image: mariadb:11
+    container_name: lodor-test-romm-db
+    environment:
+      - MYSQL_ROOT_PASSWORD=romm-test-root
+      - MYSQL_DATABASE=romm
+      - MYSQL_USER=romm
+      - MYSQL_PASSWORD=romm-test-pw
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      start_period: 30s
+      interval: 5s
+      retries: 12

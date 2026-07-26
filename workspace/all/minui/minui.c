@@ -1213,6 +1213,35 @@ static int isConsoleDir(char* path) {
 	return exactMatch(parent_dir, ROMS_PATH);
 }
 
+// lodorRevertTarget — target version of a staged, un-consumed revert, or 0 when none. Mirrors
+// rb_set() in lodor-apply-update: a usable rollback set needs both tree/ and rolled-from (written
+// LAST, so its presence means the mirror is whole). Fills out with the version to revert TO.
+static int lodorRevertTarget(char* out, size_t n) {
+	if (n) out[0] = '\0';
+	char rbdir[512];
+	snprintf(rbdir, sizeof(rbdir), "%s/Tools/%s/Lodor.pak/.update-rollback", SDCARD_PATH, PLATFORM);
+	DIR* d = opendir(rbdir);
+	if (!d) return 0;
+	int found = 0;
+	struct dirent* de;
+	while (!found && (de = readdir(d))) {
+		if (de->d_name[0] == '.') continue;
+		char rf[1024], tr[1024];
+		snprintf(rf, sizeof(rf), "%s/%s/rolled-from", rbdir, de->d_name);
+		snprintf(tr, sizeof(tr), "%s/%s/tree", rbdir, de->d_name);
+		if (!exists(rf) || !exists(tr)) continue;
+		FILE* f = fopen(rf, "r");
+		if (!f) continue;
+		if (fgets(out, n, f)) {
+			char* nl = strchr(out, '\n'); if (nl) *nl = '\0';
+			if (out[0]) found = 1;
+		}
+		fclose(f);
+	}
+	closedir(d);
+	return found;
+}
+
 static Array* getEntries(char* path){
 	Array* entries = Array_new();
 
@@ -1260,6 +1289,25 @@ static Array* getEntries(char* path){
 			Entry* settings_e = Entry_new(use, ENTRY_PAK);
 			free(settings_e->name); settings_e->name = strdup("Lodor Settings");
 			Array_push(entries, settings_e);
+		}
+	}
+
+	// lodor (1.0): make "Revert last update" discoverable. The Update Lodor.pak entry lists
+	// normally, but on miyoomini revert is a hidden say.elf two-open flow (#19 forbids a menu
+	// choice), so nothing signals it exists. When a usable rollback set is staged, decorate the
+	// entry on EVERY platform so the affordance is visible (opening it walks the existing flow).
+	if (exactMatch(path, SDCARD_PATH "/Tools/" PLATFORM)) {
+		char rv[64];
+		if (lodorRevertTarget(rv, sizeof(rv))) {
+			for (int i = 0; i < entries->count; i++) {
+				Entry* e = entries->items[i];
+				if (e && e->path && strstr(e->path, "/Update Lodor.pak")) {
+					char labeled[128];
+					snprintf(labeled, sizeof(labeled), "Update Lodor - revert to %s", rv);
+					free(e->name); e->name = strdup(labeled);
+					break;
+				}
+			}
 		}
 	}
 
@@ -4520,71 +4568,10 @@ static void Lodor_drawToast(SDL_Surface* screen) {
 	SDL_BlitSurface(txt, NULL, screen, &(SDL_Rect){x+(w-txt->w)/2, y+(h-txt->h)/2});
 	SDL_FreeSurface(txt);
 }
-static void Lodor_offerSaveOnDownload(SDL_Surface* screen, const char* rompath) {
-	char q1[MAX_PATH*2], cmd[MAX_PATH*3];
-	// lodor: opt-in pre-gate -- the device is slow; let the user skip the server lookup.
-	if (!Lodor_inlineConfirm(screen, "Check the server for a saved\ngame for this title?\n\nA: Yes   B: Skip")) return;
-	Lodor_drawMessage(screen, "Checking for saves...");
-	Lodor_shq(rompath, q1, sizeof(q1));
-	snprintf(cmd, sizeof(cmd),
-		"'%s%s' --list-saves '%s' > /tmp/lodor-saves.txt 2>/dev/null",
-		SDCARD_PATH, LODOR_ROMM_BIN, q1);
-	system(cmd);
-	// Lodor_buildSaves stores save_id in path; reuse lodor_rompath so the list entries point here.
-	strncpy(lodor_rompath, rompath, MAX_PATH-1); lodor_rompath[MAX_PATH-1]='\0';
-	Lodor_buildSaves();
-	if (!lodor_saves_items || lodor_saves_items->count==0) { Lodor_freeSaves(); return; }
-
-	// newest save = first row. label is "<date>  <device>  <size>"; pull device+when back out.
-	Entry* newest = lodor_saves_items->items[0];
-	char saveid[64];
-	strncpy(saveid, newest->path, sizeof(saveid)-1); saveid[sizeof(saveid)-1]='\0';
-	char when[64]; when[0]='\0';
-	char device[96]; strncpy(device, "another device", sizeof(device)-1); device[sizeof(device)-1]='\0';
-	{
-		// re-read the first TSV row for clean device/when (label was already collapsed for display).
-		FILE* sf = fopen("/tmp/lodor-saves.txt", "r");
-		if (sf) {
-			char line[512];
-			while (fgets(line, sizeof(line), sf)) {
-				char* nl = strpbrk(line, "\r\n"); if (nl) *nl='\0';
-				if (line[0]=='\0') continue;
-				char* id = line;
-				char* date = strchr(line, '\t'); if (!date) continue; *date++='\0';
-				char* dev  = strchr(date, '\t');  if (dev) *dev++='\0'; else dev="";
-				if (dev[0]) { char* t = strchr(dev, '\t'); if (t) *t='\0'; }
-				(void)id;
-				if (date[0]) { strncpy(when, date, sizeof(when)-1); when[sizeof(when)-1]='\0'; }
-				if (dev[0])  { strncpy(device, dev, sizeof(device)-1); device[sizeof(device)-1]='\0'; }
-				break; // first (newest) row only
-			}
-			fclose(sf);
-		}
-	}
-	if (when[0]=='\0') strncpy(when, "a previous session", sizeof(when)-1);
-	Lodor_freeSaves();
-
-	char prompt[512];
-	snprintf(prompt, sizeof(prompt),
-		"Found a save for this game on the\nserver:\n\n%s - %s\n\nDownload it so you can continue?\n\nA: Yes   B: Start fresh",
-		device, when);
-	if (!Lodor_inlineConfirm(screen, prompt)) return; // B = start fresh, leave local save untouched
-
-	char rcmd[MAX_PATH*3], out[256];
-	Lodor_shq(rompath, q1, sizeof(q1));
-	snprintf(rcmd, sizeof(rcmd), "'%s%s' --restore-save '%s' %s",
-		SDCARD_PATH, LODOR_ROMM_BIN, q1, saveid);
-	Lodor_runWithProgress(screen, "Downloading your save...", rcmd, out, sizeof(out));
-	int restored = 0;
-	{ char* r = strstr(out, "restored="); if (r) restored = atoi(r+9); }
-	if (restored) {
-		char done[256];
-		snprintf(done, sizeof(done), "Save restored - continuing from\n%s's save.", device);
-		Lodor_inlineAck(screen, done);
-	} else {
-		Lodor_inlineAck(screen, "Couldn't restore the save");
-	}
-}
+// (removed 2026-07-24) Lodor_offerSaveOnDownload — the native pre-launch "Check the server for a
+// saved game?" + restore walkthrough. This was a second pre-launch UI unique to the miyoomini lane;
+// the Go wizard launch card (minarch shim, post-exit) is now the single canonical pre-launch UI on
+// every device. The library Flashback ("serversaves") is a separate, deliberate feature and stays.
 
 // lodor: download a 0-byte cloud stub with on-screen feedback, then (if it landed) launch it.
 // launch==1 -> Entry_open on success (collection-aware saveLast); launch==0 -> stay on menu.
@@ -4607,9 +4594,10 @@ static int Lodor_downloadThenLaunch(SDL_Surface* screen, Entry* entry, int launc
 		SDCARD_PATH, LODOR_ROMM_BIN, q1);
 	Lodor_runWithProgress(screen, msg, cmd, NULL, 0);
 	if (!Lodor_needsFetch(entry->path)) {
-		// fresh download landed: offer to pull the latest server save BEFORE launching, so the
-		// restore lands before Entry_open writes /tmp/next. No-op (silent) if there is no save.
-		Lodor_offerSaveOnDownload(screen, entry->path);
+		// fresh download landed: launch it. The pre-launch save/restore is now the Go wizard launch
+		// card (fired by the minarch shim after minui exits) — the single canonical pre-launch UI on
+		// every device. minui no longer runs its own "check the server?" walkthrough here; that was a
+		// redundant second UI unique to this lane.
 		if (launch) Entry_open(entry);
 		return 1;
 	}

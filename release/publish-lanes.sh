@@ -7,11 +7,12 @@
 # script makes lane parity a pipeline step instead of a memory:
 #
 #   1. source-sync  : lodor (engine root), lodoros (fork layout), lodor-muos,
-#                     lodor-knulli — from mono main, gated (secrets + agent-pii),
-#                     committed as lodordev, pushed.
-#   2. lane releases: v$VERSION on lodor-muos (.muxapp), lodor-knulli (zip), and
-#                     lodoros (full card, only if $OUT/LodorOS-$VERSION.zip exists —
-#                     build it first with build-fullcard.sh; loud skip otherwise).
+#                     lodor-knulli, lodor-onionos — from mono main, gated
+#                     (secrets + agent-pii), committed as lodordev, pushed.
+#   2. lane releases: v$VERSION on lodor-muos (.muxapp), lodor-knulli (zip),
+#                     lodor-onionos (zip), and lodoros (full card, only if
+#                     $OUT/LodorOS-$VERSION.zip exists — build it first with
+#                     build-fullcard.sh; loud skip otherwise).
 #   3. RELEASES.md  : regenerate the LATEST block on the umbrella repo and push.
 #   4. repo-parity  : gate.sh repo-parity $VERSION — fails if any lane repo's
 #                     latest release is not this version (NextUI included).
@@ -50,7 +51,11 @@ commit_push(){ # <repo> <msg>
 }
 
 echo "== 1/4 source sync (mono main -> lane repos) =="
-for r in lodor lodoros lodor-muos lodor-knulli; do clone_fresh "$r"; done
+# clone failure is LOUD with the repo named: a missing lane repo (e.g. lodordev/lodor-onionos
+# not created yet) must read as "create the repo", never as a silent partial sync.
+for r in lodor lodoros lodor-muos lodor-knulli lodor-onionos lodor-spruce; do
+  clone_fresh "$r" || fail "clone/refresh of lodordev/$r failed — does the repo exist? Every lane repo must exist before publish (onionos is a shipping lane again as of 0.9.8.2)"
+done
 
 # NOTE (space-safety): `for f in $(ls -A)` word-splits names containing spaces (rm'ing
 # fragments, missing the real entry). Plain globs don't split; the three patterns
@@ -88,11 +93,29 @@ done
 git -C "$ROOT" archive main integrations/knulli | tar -x --strip-components=2 -C .
 git -C "$ROOT" archive main LICENSE | tar -x -C .
 
-for r in lodor lodoros lodor-muos lodor-knulli; do gate_tree "$WORK/$r" || fail "gate on $r"; done
+cd "$WORK/lodor-onionos"
+for f in * .[!.]* ..?*; do
+  [ -e "$f" ] || [ -L "$f" ] || continue
+  case "$f" in .git) ;; *) rm -rf "$f";; esac
+done
+git -C "$ROOT" archive main integrations/onionos | tar -x --strip-components=2 -C .
+git -C "$ROOT" archive main LICENSE | tar -x -C .
+
+cd "$WORK/lodor-spruce"
+for f in * .[!.]* ..?*; do
+  [ -e "$f" ] || [ -L "$f" ] || continue
+  case "$f" in .git) ;; *) rm -rf "$f";; esac
+done
+git -C "$ROOT" archive main integrations/spruce | tar -x --strip-components=2 -C .
+git -C "$ROOT" archive main LICENSE | tar -x -C .
+
+for r in lodor lodoros lodor-muos lodor-knulli lodor-onionos lodor-spruce; do gate_tree "$WORK/$r" || fail "gate on $r"; done
 commit_push lodor       "engine $VERSION"
 commit_push lodoros     "sync from mono: $VERSION"
 commit_push lodor-muos  "Lodor-muOS $VERSION"
 commit_push lodor-knulli "Lodor-Knulli $VERSION"
+commit_push lodor-onionos "Lodor-OnionOS $VERSION"
+commit_push lodor-spruce "Lodor-spruce $VERSION"
 
 echo "== 2/4 lane releases v$VERSION =="
 api(){ curl -sfS -X "$1" -H "Authorization: Bearer $TOK" -H "Accept: application/vnd.github+json" ${3:+-d "$3"} "https://api.github.com$2"; }
@@ -141,6 +164,16 @@ RID=$(mkrel lodor-knulli "Lodor-Knulli" "Lodor for Knulli $VERSION. Install/upda
 upl lodor-knulli "$RID" "$OUTDIR/Lodor-Knulli-$VERSION.zip"
 [ -f "$OUTDIR/Lodor-Knulli-$VERSION.zip.sha256" ] && upl lodor-knulli "$RID" "$OUTDIR/Lodor-Knulli-$VERSION.zip.sha256"
 
+[ -f "$OUTDIR/Lodor-OnionOS-$VERSION.zip" ] || fail "missing $OUTDIR/Lodor-OnionOS-$VERSION.zip"
+RID=$(mkrel lodor-onionos "Lodor-OnionOS" "Lodor for OnionOS $VERSION (Miyoo Mini Plus). Install/update: extract the zip onto the SD card root (adds App/LodorSync); pairing and settings are kept. $BODY_TAIL")
+upl lodor-onionos "$RID" "$OUTDIR/Lodor-OnionOS-$VERSION.zip"
+[ -f "$OUTDIR/Lodor-OnionOS-$VERSION.zip.sha256" ] && upl lodor-onionos "$RID" "$OUTDIR/Lodor-OnionOS-$VERSION.zip.sha256"
+
+[ -f "$OUTDIR/Lodor-spruce-$VERSION.zip" ] || fail "missing $OUTDIR/Lodor-spruce-$VERSION.zip"
+RID=$(mkrel lodor-spruce "Lodor-spruce" "Lodor for spruceOS $VERSION (Miyoo A30 / Mini Flip). Install/update: extract the zip onto the SD card root (adds App/Lodor); pairing and settings are kept. $BODY_TAIL")
+upl lodor-spruce "$RID" "$OUTDIR/Lodor-spruce-$VERSION.zip"
+[ -f "$OUTDIR/Lodor-spruce-$VERSION.zip.sha256" ] && upl lodor-spruce "$RID" "$OUTDIR/Lodor-spruce-$VERSION.zip.sha256"
+
 if [ -f "$OUTDIR/LodorOS-$VERSION.zip" ]; then
   RID=$(mkrel lodoros "LodorOS" "LodorOS $VERSION - full-card image for Miyoo devices. Fresh install: flash/extract this card. Already running LodorOS? Use Update Lodor on the device instead. $BODY_TAIL")
   upl lodoros "$RID" "$OUTDIR/LodorOS-$VERSION.zip"
@@ -168,6 +201,8 @@ block = f"""{b}
 | **LodorOS** — full-card image (Miyoo) | **{v}** | [lodoros · v{v}](https://github.com/lodordev/lodoros/releases/tag/v{v}) |
 | **muOS** (`.muxapp`) | **{v}** | [lodor-muos · v{v}](https://github.com/lodordev/lodor-muos/releases/tag/v{v}) |
 | **Knulli** (zip onto `/userdata`) | **{v}** | [lodor-knulli · v{v}](https://github.com/lodordev/lodor-knulli/releases/tag/v{v}) |
+| **OnionOS** (zip onto SD root — Miyoo Mini Plus) | **{v}** | [lodor-onionos · v{v}](https://github.com/lodordev/lodor-onionos/releases/tag/v{v}) |
+| **spruceOS** (zip onto SD root — Miyoo A30 / Mini Flip) | **{v}** | [lodor-spruce · v{v}](https://github.com/lodordev/lodor-spruce/releases/tag/v{v}) |
 | **NextUI** (Pak Store) | **{v}** | [lodor-nextui · {v}](https://github.com/lodordev/lodor-nextui/releases/tag/{v}) |
 | **Android** (APK) · LodorOS update-overlays | **{v}** | [lodor · v{v}](https://github.com/lodordev/lodor/releases/tag/v{v}) |
 """

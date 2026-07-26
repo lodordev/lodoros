@@ -1,0 +1,22 @@
+LodorOS GBA.pak overlay — my282 (armhf), mGBA core
+
+Purpose: fleet GBA core migration gpsp -> mGBA (Decision 2026-07-13-gba-fleet-mgba),
+so GBA save-states sync fleet-wide. This per-platform pak lands on card as
+Emus/my282/GBA.pak, which MinUI's getEmuPath() resolves BEFORE the shared
+Emus/GBA.pak (armhf) and before the base card's stock Emus/my282/GBA.pak=gpsp
+(common/utils.c:105 — SDCARD_PATH/Emus/<PLATFORM>/<EMU>.pak tried first). Shipping it
+per-platform in the update overlay makes manifest (statecores gba=mgba) + core migrate
+together ATOMICALLY, so a self-updated card can never run stock gpsp under an mgba tag
+and poison the fleet with gpsp-format states.
+
+Emulator: mgba_libretro.so — ELF 32-bit ARM, mgba commit 6dce57e, the cross-arch
+cert-proven build, sha256 e10cb5082abef8d9b4d1205e6ea1c59dcdb36ccdad2842e4f4075122bb4739b0.
+Byte-identical to lodoros/paks/Emus/GBA.pak/mgba_libretro.so and MGBA.pak/mgba_libretro.so
+(the shared armhf mgba core).
+
+launch.sh: byte-identical to lodoros/paks/Emus/GBA.pak/launch.sh — EMU_EXE=mgba, runs
+mgba_libretro.so via minarch.elf; keeps the lodor #144 LODOR_CORE_OVERRIDE line so a
+per-game core=gpsp sidecar still works. default.cfg: GBA input map, mirrored from GBA.pak.
+
+State dir: minarch writes to {TAG}-{core} = GBA-mgba, matching the my282 statecores
+manifest key gba=mgba:GBA-mgba (release/release.sh assemble_lodoros_update).

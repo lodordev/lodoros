@@ -5,8 +5,9 @@
 # lodor#47 rollback/revert contract (pre-apply mirror, bounded set, boot-time revert).
 set -eu
 ENG=${ENG:?set ENG=<amd64 lodor-sync stamped binary>}
-# MONO defaults to the shared checkout; override to test a worktree's shell layer.
-MONO=${MONO:-/mnt/cache/tmp/lodor-mono}
+# MONO defaults to the repo the test itself lives in, so a worktree's fleet-check exercises the
+# worktree's shell layer (applier/install/shim), not the shared checkout; override to point elsewhere.
+MONO=${MONO:-$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)}
 T=$(mktemp -d /tmp/lodor-p3.XXXXXX)
 echo "== workdir $T"
 PASS=0; FAIL=0
@@ -28,6 +29,10 @@ printf '\177ELF-fake-stock-minui\n'   > "$SD/.system/miyoomini/bin/minui"
 # birth-stamped OS version file: the rollback's rolled-from source (lodor#47)
 printf 'LodorOS-0.9.3\nbirth-sha\n' > "$SD/.system/version.txt"
 chmod +x "$PAK/bin/"* "$PAK/install.sh" "$PAK/lodor-sync"
+# a stale pak the GBA->mGBA migration dropped — the update's deprecated-paks.txt must delete it
+mkdir -p "$SD/Emus/miyoomini/MGBA.pak"
+printf 'stale-mgba-launch\n' > "$SD/Emus/miyoomini/MGBA.pak/launch.sh"
+printf 'stale-mgba-core\n'   > "$SD/Emus/miyoomini/MGBA.pak/mgba_libretro.so"
 # pre-existing auto.sh that ALREADY has the syncd line (the upgrade-card case)
 cat > "$SD/.userdata/miyoomini/auto.sh" <<'EOF'
 #!/bin/sh
@@ -57,6 +62,8 @@ printf '#!/bin/sh\necho newlib\n' > "$NEWPAK/lib/romm-sync-lib.sh"
 cp "$PAK/install.sh" "$NEWPAK/install.sh"
 cp "$PAK/bin/lodor-apply-update" "$NEWPAK/bin/lodor-apply-update"
 cp "$PAK/bin/minarch-shim.sh" "$NEWPAK/bin/minarch-shim.sh"
+# the new version declares MGBA.pak deprecated (glob, card-relative) — applier must delete it
+printf 'Emus/*/MGBA.pak\n' > "$NEWPAK/deprecated-paks.txt"
 printf 'update-pak\n' > "$UPZ/Tools/miyoomini/Update Lodor.pak/launch.sh"
 # a mis-built asset carrying launcher bytes — the applier must strip these, never apply them
 printf 'EVIL-new-minui\n' > "$UPZ/Tools/miyoomini/.keep" # (dir marker)
@@ -67,6 +74,10 @@ SIZE=$(stat -c%s "$T/upd.zip")
 mkdir -p "$T/www"; cp "$T/upd.zip" "$T/www/upd.zip"
 cat > "$T/www/versions.json" <<EOF
 {"schema":1,"stable":{"version":"0.9.9","notes":"test build","assets":{"lodoros-miyoomini":{"url":"http://127.0.0.1:8123/upd.zip","size":$SIZE,"sha256":"$SHA"}}}}
+EOF
+# always-newer manifest for the check-update OFFER leg (see section 4)
+cat > "$T/www/versions-check.json" <<EOF
+{"schema":1,"stable":{"version":"99.0.0","notes":"check fixture","assets":{"lodoros-miyoomini":{"url":"http://127.0.0.1:8123/upd.zip","size":$SIZE,"sha256":"$SHA"}}}}
 EOF
 # Range-capable fixture server (python3 -m http.server ignores Range — the lodor#46 resume
 # tests need honest 206/416 answers) + a request log so Range use is ASSERTABLE.
@@ -103,13 +114,29 @@ class H(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 http.server.HTTPServer(('127.0.0.1', int(sys.argv[1])), H).serve_forever()
 PYEOF
-( cd "$T/www" && python3 "$T/rangehttpd.py" 8123 "$HLOG" >/dev/null 2>&1 & echo $! > "$T/httpd.pid" )
+# exec so $! IS the python pid: backgrounding the cd&&python list makes $! the
+# wrapper subshell — the end-of-run kill then hits the wrapper and the server
+# SURVIVES as an orphan squatting on :8123, feeding stale fixtures to every
+# later run (whose own bind failure is silent). The EXIT trap also covers
+# set -e aborts, which used to leak the server the same way.
+( cd "$T/www" && exec python3 "$T/rangehttpd.py" 8123 "$HLOG" >/dev/null 2>&1 ) &
+echo $! > "$T/httpd.pid"
+trap 'kill "$(cat "$T/httpd.pid")" 2>/dev/null || true' EXIT
 sleep 1
+kill -0 "$(cat "$T/httpd.pid")" 2>/dev/null   || { echo "FATAL: fixture server did not start — is :8123 held by a stale rangehttpd?"; exit 1; }
+curl -sf --max-time 5 http://127.0.0.1:8123/versions.json | cmp -s - "$T/www/versions.json"   || { echo "FATAL: :8123 is not serving THIS run's fixtures (stale server from an earlier run)"; exit 1; }
 
 # ---- 4. engine --check-update + --fetch-update from the pak dir -------------------
 cd "$PAK"
+# The offer path is asserted against an always-newer 99.0.0 manifest: the
+# binary's stamped version moves with release, and a fixture pinned AT the
+# shipped version reports update=0 forever (this leg broke the day VERSION
+# reached 0.9.9, 2026-07-20). The 0.9.9 manifest now asserts the
+# already-current path instead (valid for any stamped version >= 0.9.9).
+OUT=$(LODOR_VERSIONS_URL=http://127.0.0.1:8123/versions-check.json "$ENG" --check-update)
+echo "$OUT" | grep -Eq "update=1 current=[^ ]+ latest=99.0.0" && ok "--check-update offers newer 99.0.0" || bad "check-offer: $OUT"
 OUT=$(LODOR_VERSIONS_URL=http://127.0.0.1:8123/versions.json "$ENG" --check-update)
-echo "$OUT" | grep -Eq "update=1 current=[0-9][0-9.]* latest=0.9.9" && ok "--check-update sees 0.9.9" || bad "check: $OUT"
+echo "$OUT" | grep -Eq "update=0 current=[^ ]+ latest=0.9.9" && ok "--check-update already-current reports update=0" || bad "check-current: $OUT"
 FOUT=$(LODOR_VERSIONS_URL=http://127.0.0.1:8123/versions.json LODOR_UPDATE_ASSET=lodoros-miyoomini "$ENG" --fetch-update)
 echo "$FOUT" | grep -q "fetched=1 version=0.9.9" && ok "--fetch-update staged ($FOUT)" || bad "fetch: $FOUT"
 [ -f "$PAK/.update/READY" ] && ok "READY marker written" || bad "no READY marker"
@@ -175,6 +202,11 @@ grep -q "echo lib" "$RBSET/tree/Tools/miyoomini/Lodor.pak/lib/romm-sync-lib.sh" 
 [ "$(head -1 "$RBSET/rolled-from" 2>/dev/null)" = "0.9.3" ] \
   && ok "rolled-from marker = 0.9.3 (from version.txt)" || bad "rolled-from wrong: '$(head -1 "$RBSET/rolled-from" 2>/dev/null)'"
 [ -e "$RBSET/tree/.system/miyoomini/bin/minui" ] && bad "rollback captured launcher bytes (strip ran too late)" || ok "rollback has no launcher bytes (staged after strip)"
+# 1.0 deprecated-pak cleanup: the update's deprecated-paks.txt (Emus/*/MGBA.pak) removes the pak
+# from the card, mirroring its bytes into the rollback set first so a revert restores it.
+[ ! -e "$SD/Emus/miyoomini/MGBA.pak" ] && ok "deprecated MGBA.pak removed from card" || bad "deprecated MGBA.pak still on card"
+grep -q "stale-mgba-launch" "$RBSET/tree/Emus/miyoomini/MGBA.pak/launch.sh" 2>/dev/null \
+  && ok "deprecated MGBA.pak mirrored into rollback (revert restores it)" || bad "deprecated pak not captured in rollback mirror"
 # re-run = no-op
 SDCARD_PATH="$SD" PLATFORM=miyoomini sh "$PAK/bin/lodor-apply-update"
 ok "applier re-run is a clean no-op (no staging)"
@@ -238,6 +270,5 @@ SDCARD_PATH="$SD" PLATFORM=miyoomini sh "$PAK/bin/lodor-apply-update"
 grep -q "NEW-engine-v0.9.9" "$PAK/lodor-sync" && ok "setless revert request changed nothing" || bad "setless revert touched the engine"
 [ ! -d "$PAK/.update-rollback" ] && ok "setless revert request discarded" || bad "dangling revert request left behind"
 
-kill "$(cat "$T/httpd.pid")" 2>/dev/null || true
 echo "== RESULT: $PASS pass, $FAIL fail =="
 [ "$FAIL" = 0 ]

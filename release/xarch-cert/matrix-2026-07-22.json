@@ -1,0 +1,386 @@
+{
+ "version": 1,
+ "date": "2026-07-22",
+ "repo_commit": "86ac23d",
+ "method": "release/xarch-cert/harness.c under qemu-user docker (arm32v7/gcc:12, arm64v8/gcc:12): gen 300f seed on origin arch, origin's own +300/+900 continuation as reference, target arch loadrun same seed +300/+900; byte-compare trajectories (inert constant-offset islands pass, compounding divergence fails). Single-arch a->a lines are round-trip fidelity: fresh-boot 600/900f reference vs save@300+load continuation.",
+ "rows": [
+  {
+   "core": "fceumm",
+   "pair": "armhf->arm64",
+   "verdict": "PASS",
+   "frames": "300+300/900",
+   "evidence": "byte-identical (+300 diff=0, +900 diff=0)",
+   "rom": "1942 (Japan, USA) (En).nes",
+   "rom_sha256": "dea6d0e536bf0ca722ecd8c9f61f05030721c28eee33aea25505044ed3ba051c",
+   "version": {
+    "armhf": "(SVN) 449db5d",
+    "arm64": "(SVN) 449db5d"
+   },
+   "core_sha256": {
+    "armhf": "f2c27b47835e3823d202f9553758e89fd5cba4561ca41e9fbef37356c71a83c6",
+    "arm64": "187fccd14d0bf5882c2168049f57728d6c96800ff971c4666ff646fddc322a79"
+   },
+   "core_source": {
+    "armhf": "/mnt/cache/tmp/lodor-release/work/card/.system/miyoomini/cores/fceumm_libretro.so",
+    "arm64": "/mnt/cache/tmp/lodor-release/work/card/.system/tg5040/cores/fceumm_libretro.so"
+   }
+  },
+  {
+   "core": "fceumm",
+   "pair": "arm64->armhf",
+   "verdict": "PASS",
+   "frames": "300+300/900",
+   "evidence": "byte-identical (+300 diff=0, +900 diff=0)",
+   "rom": "1942 (Japan, USA) (En).nes",
+   "rom_sha256": "dea6d0e536bf0ca722ecd8c9f61f05030721c28eee33aea25505044ed3ba051c",
+   "version": {
+    "arm64": "(SVN) 449db5d",
+    "armhf": "(SVN) 449db5d"
+   },
+   "core_sha256": {
+    "arm64": "187fccd14d0bf5882c2168049f57728d6c96800ff971c4666ff646fddc322a79",
+    "armhf": "f2c27b47835e3823d202f9553758e89fd5cba4561ca41e9fbef37356c71a83c6"
+   },
+   "core_source": {
+    "arm64": "/mnt/cache/tmp/lodor-release/work/card/.system/tg5040/cores/fceumm_libretro.so",
+    "armhf": "/mnt/cache/tmp/lodor-release/work/card/.system/miyoomini/cores/fceumm_libretro.so"
+   }
+  },
+  {
+   "core": "gambatte",
+   "pair": "armhf->arm64",
+   "verdict": "PASS",
+   "frames": "300+300/900",
+   "evidence": "inert byte-island 12B, same offsets at +300/+900 (non-compounding)",
+   "rom": "Adventures of Lolo (Europe) (SGB Enhanced).gb",
+   "rom_sha256": "4c156c4d826b9cba5741feb621de60c6294adb36553fc43971794bd2a4ffb34a",
+   "version": {
+    "armhf": "v0.5.0 9d92381",
+    "arm64": "v0.5.0 9d92381"
+   },
+   "core_sha256": {
+    "armhf": "47eb71cb8c86d10547caf70eb633b4468c38fbc17f1e4456859b865d0950818e",
+    "arm64": "82cb3a583ad04e508edf599f234fdb585fcf9f3204fc35521af5470c1c8a31cd"
+   },
+   "core_source": {
+    "armhf": "/mnt/cache/tmp/lodor-release/work/card/.system/miyoomini/cores/gambatte_libretro.so",
+    "arm64": "/mnt/cache/tmp/lodor-release/work/card/.system/tg5040/cores/gambatte_libretro.so"
+   }
+  },
+  {
+   "core": "gambatte",
+   "pair": "arm64->armhf",
+   "verdict": "PASS",
+   "frames": "300+300/900",
+   "evidence": "inert byte-island 12B, same offsets at +300/+900 (non-compounding)",
+   "rom": "Adventures of Lolo (Europe) (SGB Enhanced).gb",
+   "rom_sha256": "4c156c4d826b9cba5741feb621de60c6294adb36553fc43971794bd2a4ffb34a",
+   "version": {
+    "arm64": "v0.5.0 9d92381",
+    "armhf": "v0.5.0 9d92381"
+   },
+   "core_sha256": {
+    "arm64": "82cb3a583ad04e508edf599f234fdb585fcf9f3204fc35521af5470c1c8a31cd",
+    "armhf": "47eb71cb8c86d10547caf70eb633b4468c38fbc17f1e4456859b865d0950818e"
+   },
+   "core_source": {
+    "arm64": "/mnt/cache/tmp/lodor-release/work/card/.system/tg5040/cores/gambatte_libretro.so",
+    "armhf": "/mnt/cache/tmp/lodor-release/work/card/.system/miyoomini/cores/gambatte_libretro.so"
+   }
+  },
+  {
+   "core": "picodrive",
+   "pair": "armhf->arm64",
+   "verdict": "FAIL",
+   "frames": "300+300/900",
+   "evidence": "diff grows/moves: +300=3B -> +900=4B; probe +2700: diff=29B",
+   "rom": "3 Ninjas Kick Back (USA).md",
+   "rom_sha256": "8cfdc448d06259ade9390aead7b997872f99bf88a89e4b247d8ccb4ce180f70b",
+   "version": {
+    "armhf": "2.01-b0be121",
+    "arm64": "2.01-b0be121"
+   },
+   "core_sha256": {
+    "armhf": "b3f8d59383e0344ec6afcb79e400dd705f140076a540533cb714ce17b7d8cbc3",
+    "arm64": "5f1bf0ce96e1d60b3e0b016c2fb8d71b00fa6c695d80a019619516b3d28c6463"
+   },
+   "core_source": {
+    "armhf": "/mnt/cache/tmp/lodor-release/work/card/.system/miyoomini/cores/picodrive_libretro.so",
+    "arm64": "/mnt/cache/tmp/lodor-release/work/card/.system/tg5040/cores/picodrive_libretro.so"
+   }
+  },
+  {
+   "core": "picodrive",
+   "pair": "arm64->armhf",
+   "verdict": "FAIL",
+   "frames": "300+300/900",
+   "evidence": "diff grows/moves: +300=3B -> +900=4B; probe +2700: diff=30B",
+   "rom": "3 Ninjas Kick Back (USA).md",
+   "rom_sha256": "8cfdc448d06259ade9390aead7b997872f99bf88a89e4b247d8ccb4ce180f70b",
+   "version": {
+    "arm64": "2.01-b0be121",
+    "armhf": "2.01-b0be121"
+   },
+   "core_sha256": {
+    "arm64": "5f1bf0ce96e1d60b3e0b016c2fb8d71b00fa6c695d80a019619516b3d28c6463",
+    "armhf": "b3f8d59383e0344ec6afcb79e400dd705f140076a540533cb714ce17b7d8cbc3"
+   },
+   "core_source": {
+    "arm64": "/mnt/cache/tmp/lodor-release/work/card/.system/tg5040/cores/picodrive_libretro.so",
+    "armhf": "/mnt/cache/tmp/lodor-release/work/card/.system/miyoomini/cores/picodrive_libretro.so"
+   }
+  },
+  {
+   "core": "picodrive",
+   "pair": "armhf->arm64",
+   "verdict": "PASS",
+   "frames": "300+300/900",
+   "evidence": "inert byte-island 3B, same offsets at +300/+900 (non-compounding)",
+   "rom": "Aerial Assault (World) (Rev 1).gg",
+   "rom_sha256": "81529fad238581184ae94f2ec1fa4a3c77cd232b679555f9742f05b5a3862fe4",
+   "version": {
+    "armhf": "2.01-b0be121",
+    "arm64": "2.01-b0be121"
+   },
+   "core_sha256": {
+    "armhf": "b3f8d59383e0344ec6afcb79e400dd705f140076a540533cb714ce17b7d8cbc3",
+    "arm64": "5f1bf0ce96e1d60b3e0b016c2fb8d71b00fa6c695d80a019619516b3d28c6463"
+   },
+   "core_source": {
+    "armhf": "/mnt/cache/tmp/lodor-release/work/card/.system/miyoomini/cores/picodrive_libretro.so",
+    "arm64": "/mnt/cache/tmp/lodor-release/work/card/.system/tg5040/cores/picodrive_libretro.so"
+   }
+  },
+  {
+   "core": "picodrive",
+   "pair": "arm64->armhf",
+   "verdict": "PASS",
+   "frames": "300+300/900",
+   "evidence": "inert byte-island 3B, same offsets at +300/+900 (non-compounding)",
+   "rom": "Aerial Assault (World) (Rev 1).gg",
+   "rom_sha256": "81529fad238581184ae94f2ec1fa4a3c77cd232b679555f9742f05b5a3862fe4",
+   "version": {
+    "arm64": "2.01-b0be121",
+    "armhf": "2.01-b0be121"
+   },
+   "core_sha256": {
+    "arm64": "5f1bf0ce96e1d60b3e0b016c2fb8d71b00fa6c695d80a019619516b3d28c6463",
+    "armhf": "b3f8d59383e0344ec6afcb79e400dd705f140076a540533cb714ce17b7d8cbc3"
+   },
+   "core_source": {
+    "arm64": "/mnt/cache/tmp/lodor-release/work/card/.system/tg5040/cores/picodrive_libretro.so",
+    "armhf": "/mnt/cache/tmp/lodor-release/work/card/.system/miyoomini/cores/picodrive_libretro.so"
+   }
+  },
+  {
+   "core": "mgba",
+   "pair": "armhf->arm64",
+   "verdict": "PASS",
+   "frames": "300+300/900",
+   "evidence": "byte-identical (+300 diff=0, +900 diff=0)",
+   "rom": "emerald.gba",
+   "rom_sha256": "a9dec84dfe7f62ab2220bafaef7479da0929d066ece16a6885f6226db19085af",
+   "version": {
+    "armhf": "0.11-dev 747362c",
+    "arm64": "0.11-dev 747362c"
+   },
+   "core_sha256": {
+    "armhf": "e10cb5082abef8d9b4d1205e6ea1c59dcdb36ccdad2842e4f4075122bb4739b0",
+    "arm64": "178e78b09b90fa12a7be1147b9110d472db26f62ad3f5e8b44f73c89efca7023"
+   },
+   "core_source": {
+    "armhf": "/mnt/cache/tmp/mgba-cert/cardbins/miyoomini_armhf.so",
+    "arm64": "/mnt/cache/tmp/mgba-cert/cardbins/my355_arm64.so"
+   }
+  },
+  {
+   "core": "mgba",
+   "pair": "arm64->armhf",
+   "verdict": "PASS",
+   "frames": "300+300/900",
+   "evidence": "byte-identical (+300 diff=0, +900 diff=0)",
+   "rom": "emerald.gba",
+   "rom_sha256": "a9dec84dfe7f62ab2220bafaef7479da0929d066ece16a6885f6226db19085af",
+   "version": {
+    "arm64": "0.11-dev 747362c",
+    "armhf": "0.11-dev 747362c"
+   },
+   "core_sha256": {
+    "arm64": "178e78b09b90fa12a7be1147b9110d472db26f62ad3f5e8b44f73c89efca7023",
+    "armhf": "e10cb5082abef8d9b4d1205e6ea1c59dcdb36ccdad2842e4f4075122bb4739b0"
+   },
+   "core_source": {
+    "arm64": "/mnt/cache/tmp/mgba-cert/cardbins/my355_arm64.so",
+    "armhf": "/mnt/cache/tmp/mgba-cert/cardbins/miyoomini_armhf.so"
+   }
+  },
+  {
+   "core": "gpsp",
+   "pair": "armhf->armhf",
+   "verdict": "FAIL",
+   "frames": "300+300/600",
+   "evidence": "diff grows/moves: +300=0B -> +900=1B; probe +2700: diff=1B",
+   "rom": "emerald.gba",
+   "rom_sha256": "a9dec84dfe7f62ab2220bafaef7479da0929d066ece16a6885f6226db19085af",
+   "version": {
+    "armhf": "v1.0.0-36061ca"
+   },
+   "core_sha256": {
+    "armhf": "ef0cea4d2a2d6acd81e0b770c7ca0574e691bedea61ef351d04125710c53a6d6"
+   },
+   "core_source": {
+    "armhf": "/mnt/cache/tmp/lodor-release/work/card/.system/miyoomini/cores/gpsp_libretro.so"
+   }
+  },
+  {
+   "core": "gpsp",
+   "pair": "arm64->arm64",
+   "verdict": "PASS",
+   "frames": "300+300/600",
+   "evidence": "inert byte-island 1B, same offsets at +300/+900 (non-compounding)",
+   "rom": "emerald.gba",
+   "rom_sha256": "a9dec84dfe7f62ab2220bafaef7479da0929d066ece16a6885f6226db19085af",
+   "version": {
+    "arm64": "v1.0.0-36061ca"
+   },
+   "core_sha256": {
+    "arm64": "e62ac39c0687d23143d6fa1bbc3770beb31f4cbe67a96644ab1d210b1ae7d022"
+   },
+   "core_source": {
+    "arm64": "/mnt/cache/tmp/lodor-release/work/card/.system/tg5040/cores/gpsp_libretro.so"
+   }
+  },
+  {
+   "core": "snes9x2005_plus",
+   "pair": "armhf->armhf",
+   "verdict": "FAIL",
+   "frames": "300+300/600",
+   "evidence": "constant 530B byte-island, same offsets at +300/+900 (NON-compounding but exceeds 64B inert threshold \u2014 needs source-level investigation before any pass)",
+   "rom": "3 Ninjas Kick Back (USA).sfc",
+   "rom_sha256": "2ffe8828480f943056fb1ab5c3c84d48a0bf8cbe3ed7c9960b349b59adb07f3b",
+   "version": {
+    "armhf": "v1.36 74d871d"
+   },
+   "core_sha256": {
+    "armhf": "f85632f9bb46aed1b3f2197f23e272b3e64a6e02e39bd984301a30e146373009"
+   },
+   "core_source": {
+    "armhf": "/mnt/cache/tmp/lodor-release/work/card/.system/miyoomini/cores/snes9x2005_plus_libretro.so"
+   }
+  },
+  {
+   "core": "snes9x2005_plus",
+   "pair": "arm64->arm64",
+   "verdict": "FAIL",
+   "frames": "300+300/600",
+   "evidence": "constant 530B byte-island, same offsets at +300/+900 (NON-compounding but exceeds 64B inert threshold \u2014 needs source-level investigation before any pass)",
+   "rom": "3 Ninjas Kick Back (USA).sfc",
+   "rom_sha256": "2ffe8828480f943056fb1ab5c3c84d48a0bf8cbe3ed7c9960b349b59adb07f3b",
+   "version": {
+    "arm64": "v1.36 74d871d"
+   },
+   "core_sha256": {
+    "arm64": "629a50c2047fdca9222760aa550341ef3e699cb18c8cc9e1fea6ba3a36d8d009"
+   },
+   "core_source": {
+    "arm64": "/mnt/cache/tmp/lodor-release/work/card/.system/tg5040/cores/snes9x2005_plus_libretro.so"
+   }
+  },
+  {
+   "core": "mgba",
+   "pair": "arm64->arm64",
+   "verdict": "PASS",
+   "frames": "300+300/600",
+   "evidence": "inert byte-island 3B, same offsets at +300/+900 (non-compounding)",
+   "rom": "emerald.gba",
+   "rom_sha256": "a9dec84dfe7f62ab2220bafaef7479da0929d066ece16a6885f6226db19085af",
+   "version": {
+    "arm64": "0.11-dev 747362c"
+   },
+   "core_sha256": {
+    "arm64": "178e78b09b90fa12a7be1147b9110d472db26f62ad3f5e8b44f73c89efca7023"
+   },
+   "core_source": {
+    "arm64": "/mnt/cache/tmp/mgba-cert/cardbins/my355_arm64.so"
+   }
+  },
+  {
+   "core": "snes9x",
+   "pair": "arm64->arm64",
+   "verdict": "PASS",
+   "frames": "300+300/600",
+   "evidence": "byte-identical (+300 diff=0, +900 diff=0)",
+   "rom": "3 Ninjas Kick Back (USA).sfc",
+   "rom_sha256": "2ffe8828480f943056fb1ab5c3c84d48a0bf8cbe3ed7c9960b349b59adb07f3b",
+   "version": {
+    "arm64": "1.63 185488c"
+   },
+   "core_sha256": {
+    "arm64": "766990335fc16eaa1275673e847dbac9c3b5d17f1dfb6a84f1a3efd2d5c99fde"
+   },
+   "core_source": {
+    "arm64": "https://buildbot.libretro.com/nightly/linux/aarch64/latest/snes9x_libretro.so.zip"
+   }
+  },
+  {
+   "core": "genesis_plus_gx",
+   "pair": "arm64->arm64",
+   "verdict": "PASS",
+   "frames": "300+300/600",
+   "evidence": "byte-identical (+300 diff=0, +900 diff=0)",
+   "rom": "3 Ninjas Kick Back (USA).md",
+   "rom_sha256": "8cfdc448d06259ade9390aead7b997872f99bf88a89e4b247d8ccb4ce180f70b",
+   "version": {
+    "arm64": "v1.7.4 fa4dca5"
+   },
+   "core_sha256": {
+    "arm64": "93bdc47273c800fdc1def4705929bdf099f076a854f6e69c790317034a67abec"
+   },
+   "core_source": {
+    "arm64": "https://buildbot.libretro.com/nightly/linux/aarch64/latest/genesis_plus_gx_libretro.so.zip"
+   }
+  },
+  {
+   "core": "gpsp",
+   "pair": "armhf->arm64",
+   "verdict": "PASS",
+   "frames": "300+300/900",
+   "evidence": "byte-identical (+300 diff=0, +900 diff=0)",
+   "rom": "emerald.gba",
+   "rom_sha256": "a9dec84dfe7f62ab2220bafaef7479da0929d066ece16a6885f6226db19085af",
+   "version": {
+    "armhf": "v1.0.0-36061ca",
+    "arm64": "v1.0.0-36061ca"
+   },
+   "core_sha256": {
+    "armhf": "ef0cea4d2a2d6acd81e0b770c7ca0574e691bedea61ef351d04125710c53a6d6",
+    "arm64": "e62ac39c0687d23143d6fa1bbc3770beb31f4cbe67a96644ab1d210b1ae7d022"
+   },
+   "core_source": {
+    "armhf": "/mnt/cache/tmp/lodor-release/work/card/.system/miyoomini/cores/gpsp_libretro.so",
+    "arm64": "/mnt/cache/tmp/lodor-release/work/card/.system/tg5040/cores/gpsp_libretro.so"
+   }
+  },
+  {
+   "core": "snes9x2005_plus",
+   "pair": "armhf->arm64",
+   "verdict": "FAIL",
+   "frames": "300+300/900",
+   "evidence": "unserialize refused/failed on arm64 (rc=7): UNSERIALIZE refused;LOCAL serialize_size=564544 incoming=531668;UNSERIALIZE refused;",
+   "rom": "3 Ninjas Kick Back (USA).sfc",
+   "rom_sha256": "2ffe8828480f943056fb1ab5c3c84d48a0bf8cbe3ed7c9960b349b59adb07f3b",
+   "version": {
+    "armhf": "v1.36 74d871d",
+    "arm64": "v1.36 74d871d"
+   },
+   "core_sha256": {
+    "armhf": "f85632f9bb46aed1b3f2197f23e272b3e64a6e02e39bd984301a30e146373009",
+    "arm64": "629a50c2047fdca9222760aa550341ef3e699cb18c8cc9e1fea6ba3a36d8d009"
+   },
+   "core_source": {
+    "armhf": "/mnt/cache/tmp/lodor-release/work/card/.system/miyoomini/cores/snes9x2005_plus_libretro.so",
+    "arm64": "/mnt/cache/tmp/lodor-release/work/card/.system/tg5040/cores/snes9x2005_plus_libretro.so"
+   }
+  }
+ ]
+}

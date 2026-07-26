@@ -155,7 +155,6 @@ _ts_avail_kb() {
 _ts_capable() {
 	case "$PLAT" in
 		miyoomini) return 1 ;;                                  # 128 MB — never
-		my282) return 1 ;;  # A30 512 MB — never (gated OFF 2026-07-01: A33 firmware + RAM too marginal; use tier-2)
 		my355|tg5040|rg35xxplus) : ;;                           # 1 GB — eligible
 		*) [ "${LODOR_TS_FORCE:-0}" = "1" ] || return 1 ;;      # unknown — opt-in only
 	esac
@@ -399,8 +398,11 @@ tailscale_up_interactive() {
 	echo $! > "$TS_STATEDIR/up.pid" 2>/dev/null
 
 	# Capture the login URL (<=15s).
-	i=0; url=""; _prev=""
-	while [ "$i" -lt 150 ]; do
+	url=""; _prev=""; _t0=$(date +%s)
+	# 60s WALL-CLOCK window (was ~15s by iteration count): the first control-plane handshake
+	# on a fresh node took 29s on RG34XX-H hardware (2026-07-21) — the URL was still in
+	# flight when the old window gave up. Applies fleet-wide; hardware-evidenced on muOS.
+	while [ $(( $(date +%s) - _t0 )) -lt 60 ]; do
 		# PRIMARY: the daemon's status JSON AuthURL — atomic and complete by construction.
 		# (Scraping up.log races `tailscale up`'s buffered writes: NextUI boot 3 captured a
 		# 31-char half-flushed URL. The JSON field can never be partially written.)
@@ -416,7 +418,7 @@ tailscale_up_interactive() {
 		# Auth might have completed instantly (state reused mid-race) — stop waiting.
 		"$TS_BIN_DIR/tailscale" --socket="$TS_SOCK" status --json 2>/dev/null \
 			| grep -q '"BackendState"[[:space:]]*:[[:space:]]*"Running"' && break
-		sleep 0.1; i=$((i + 1))
+		sleep 0.25
 	done
 	[ -n "$url" ] && ts_log "interactive: login URL captured (len=${#url})"
 	echo "$url"

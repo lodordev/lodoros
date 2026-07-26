@@ -247,7 +247,7 @@ write_config() {
 
     echo "Generating wpa_supplicant.conf"
     template_file="$PAK_DIR/res/wpa_supplicant.conf.tmpl"
-    if [ "$PLATFORM" = "miyoomini" ] || [ "$PLATFORM" = "my282" ] || [ "$PLATFORM" = "my355" ]; then
+    if [ "$PLATFORM" = "miyoomini" ] || [ "$PLATFORM" = "my355" ]; then
         template_file="$PAK_DIR/res/wpa_supplicant.conf.$PLATFORM.tmpl"
     fi
 
@@ -322,9 +322,6 @@ write_config() {
     if [ "$PLATFORM" = "miyoomini" ]; then
         cp "$PAK_DIR/res/wpa_supplicant.conf" /etc/wifi/wpa_supplicant.conf
         cp "$PAK_DIR/res/wpa_supplicant.conf" /appconfigs/wpa_supplicant.conf
-    elif [ "$PLATFORM" = "my282" ]; then
-        cp "$PAK_DIR/res/wpa_supplicant.conf" /etc/wifi/wpa_supplicant.conf
-        cp "$PAK_DIR/res/wpa_supplicant.conf" /config/wpa_supplicant.conf
     elif [ "$PLATFORM" = "my355" ]; then
         cp "$PAK_DIR/res/wpa_supplicant.conf" /userdata/cfg/wpa_supplicant.conf
     elif [ "$PLATFORM" = "rg35xxplus" ]; then
@@ -562,7 +559,7 @@ main() {
         return 1
     fi
 
-    allowed_platforms="miyoomini my282 my355"
+    allowed_platforms="miyoomini my355"
     if ! echo "$allowed_platforms" | grep -q "$PLATFORM"; then
         show_message "$PLATFORM is not a supported platform" 2
         return 1

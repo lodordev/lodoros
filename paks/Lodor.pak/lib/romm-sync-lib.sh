@@ -252,6 +252,12 @@ wait_net() {
 # "host doesn't resolve" vs "resolves but TCP blocked". Temporary; never gates Wi-Fi success.
 _net_diag() {
 	[ -n "${ROMM_HOST:-}" ] || { _wlog "net-diag: ROMM_HOST unset, skipping"; return 0; }
+	# Rate-limited: at most one full diag block per 30 min. When the (formerly trusted) nc probe
+	# false-failed on every invoke, a diag block per call buried the real signal in wifi-debug.log
+	# (2026-07-22). /tmp clears on reboot — a fresh boot may diag again.
+	_nd_last=$(cat /tmp/romm-last-netdiag 2>/dev/null || echo 0)
+	[ $(( $(date +%s) - _nd_last )) -lt 1800 ] && return 0
+	date +%s > /tmp/romm-last-netdiag 2>/dev/null
 	{
 		echo "--- net-diag $(date +'%F %T') host=$ROMM_HOST port=${ROMM_PORT:-443} ip=$(_wlan_ip) ---"
 		echo "[resolv.conf]"; cat /etc/resolv.conf 2>&1
@@ -317,7 +323,17 @@ _romm_reachable() {
 		_REACH_DETAIL="RomM $ROMM_HOST:${ROMM_PORT:-443} TCP-reachable (kernel path = engine transport on this config)"
 		return 0
 	fi
-	_REACH_DETAIL="RomM $ROMM_HOST:${ROMM_PORT:-443} not TCP-reachable"
+	# nc FAILED — corroborate before claiming unreachable. The Flip's busybox nc fails against
+	# EVERYTHING (even targets ping + the Go engine reach fine; found 2026-07-22 — every invoke
+	# since 0.9.6 logged a false "server down/blocked"). busybox wget speaking plain HTTP at the
+	# real port is an independent TCP oracle: a TLS port answers the bad request with an
+	# "HTTP/x 400" header line, so ANY HTTP/ line proves the connect worked. Only when BOTH
+	# tools fail do we claim unreachable.
+	if _clk_try 6 wget -S -q -O /dev/null "http://$ROMM_HOST:${ROMM_PORT:-443}/" 2>&1 | grep -qi "HTTP/"; then
+		_REACH_DETAIL="RomM $ROMM_HOST:${ROMM_PORT:-443} reachable via HTTP probe (busybox nc unreliable on this firmware — ignore its FAILs)"
+		return 0
+	fi
+	_REACH_DETAIL="RomM $ROMM_HOST:${ROMM_PORT:-443} not TCP-reachable (nc + HTTP probes agree)"
 	return 1
 }
 # Gateway reachability — the LINK-alive test that separates a WEDGED radio (have IP but can't reach
@@ -413,7 +429,7 @@ wifi_ensure_reachable() {
 	# Positively unreachable on the kernel path (which IS the engine transport for non-tier-1
 	# configs) — is the LINK dead, or is RomM just down?
 	if _gateway_reachable; then
-		_REACH_DETAIL="RomM unreachable but gateway OK — server down/blocked, radio left alone"
+		_REACH_DETAIL="RomM unreachable (nc + HTTP probes) but gateway OK — server down/blocked; engine rc is authoritative; radio left alone"
 		_wlog "reach: $_REACH_DETAIL"
 		_net_diag
 		return 1
@@ -893,7 +909,7 @@ _wifi_write_config() {
 	fi
 	_resdir="$WIFI_BIN/../res"
 	case "$PLAT" in
-		miyoomini|my282|my355) _tmpl="$_resdir/wpa_supplicant.conf.$PLAT.tmpl" ;;
+		miyoomini|my355) _tmpl="$_resdir/wpa_supplicant.conf.$PLAT.tmpl" ;;
 		*)                     _tmpl="$_resdir/wpa_supplicant.conf.tmpl" ;;
 	esac
 	[ -f "$_tmpl" ] || _tmpl="$_resdir/wpa_supplicant.conf.miyoomini.tmpl"   # last-ditch fallback
@@ -943,9 +959,6 @@ _wifi_write_config() {
 		miyoomini)   # stock: cp -> /etc/wifi + /appconfigs (service-on: wpa_supplicant -c /appconfigs/...)
 			cp "$_out" /etc/wifi/wpa_supplicant.conf 2>/dev/null
 			cp "$_out" /appconfigs/wpa_supplicant.conf 2>/dev/null ;;
-		my282)       # stock: cp -> /etc/wifi + /config (service-on: /etc/init.d/wpa_supplicant start)
-			cp "$_out" /etc/wifi/wpa_supplicant.conf 2>/dev/null
-			cp "$_out" /config/wpa_supplicant.conf 2>/dev/null ;;
 		my355)       # stock: cp -> /userdata/cfg (service-on: wpa_supplicant -c /userdata/cfg/...)
 			mkdir -p /userdata/cfg 2>/dev/null
 			cp "$_out" /userdata/cfg/wpa_supplicant.conf 2>/dev/null ;;
@@ -1025,16 +1038,24 @@ _clk_try() {
 	if command -v timeout >/dev/null 2>&1; then timeout "$_clk_t" "$@"; else "$@"; fi
 }
 set_clock() {
-	# FAST PATH: the device has no RTC battery, so the clock starts at epoch (1970) after a
-	# power loss and needs ONE network sync per boot. Re-running NTP on EVERY engine call cost
-	# 6-10s each (the real "everything is slow" cause). If the clock already reads a sane recent
-	# year it's been set this session — skip instantly. Only the first call per boot pays NTP.
+	# FAST PATH — keyed on "a network source ran THIS BOOT" (/tmp marker), NOT on the year
+	# looking sane. lodor_clock_restore seeds a sane-but-STALE year from datetime.txt at boot,
+	# so a year check alone meant NTP never ran again and the clock fell behind by the sum of
+	# all powered-off time (found 2026-07-22: the Flip was ~25h behind while every log line
+	# claimed set_clock success). One real network attempt per boot corrects the restored
+	# clock; every later call is instant. A garbage (pre-2024) clock always retries — TLS is
+	# dead until it's fixed, so the marker never gates the epoch case.
 	_yr=$(date +%Y 2>/dev/null)
-	if [ -n "$_yr" ] && [ "$_yr" -ge 2024 ] 2>/dev/null; then return 0; fi
-	if command -v ntpd >/dev/null 2>&1 && _clk_try 15 ntpd -q -n -p 162.159.200.123 >/dev/null 2>&1; then _persist_clock; return 0; fi
-	if command -v sntp >/dev/null 2>&1 && _clk_try 10 sntp -sS 162.159.200.123 >/dev/null 2>&1; then _persist_clock; return 0; fi
+	_sane=0; [ -n "$_yr" ] && [ "$_yr" -ge 2024 ] 2>/dev/null && _sane=1
+	if [ "$_sane" = 1 ] && [ -f /tmp/lodor-clock-attempted ]; then return 0; fi
+	[ "$_sane" = 1 ] && : > /tmp/lodor-clock-attempted 2>/dev/null
+	if command -v ntpd >/dev/null 2>&1 && _clk_try 15 ntpd -q -n -p 162.159.200.123 >/dev/null 2>&1; then _persist_clock; : > /tmp/lodor-clock-attempted 2>/dev/null; return 0; fi
+	if command -v sntp >/dev/null 2>&1 && _clk_try 10 sntp -sS 162.159.200.123 >/dev/null 2>&1; then _persist_clock; : > /tmp/lodor-clock-attempted 2>/dev/null; return 0; fi
 	d="$(_clk_try 10 wget -S -q -O /dev/null "http://${ROMM_HOST:-}/" 2>&1 | sed -n 's/^ *Date: //p' | head -1)"
-	if [ -n "$d" ] && date -s "$d" >/dev/null 2>&1; then _persist_clock; return 0; fi
+	if [ -n "$d" ] && date -s "$d" >/dev/null 2>&1; then _persist_clock; : > /tmp/lodor-clock-attempted 2>/dev/null; return 0; fi
+	# every network source failed: a sane (restored) clock is still usable for TLS — succeed so
+	# sync proceeds on the stale-but-close clock; the epoch case stays an honest failure.
+	[ "$_sane" = 1 ] && return 0
 	return 1
 }
 
@@ -1140,7 +1161,21 @@ run_sync() {
 	  # the flaky radio (that load was pointless and slow). Just flush the offline pending-upload queue
 	  # and refresh the Continue cache. Worst exit code wins.
 	  worst=0
-	  "$SYNC_BIN" --push-pending;       rc=$?; [ "$rc" -gt "$worst" ] && worst=$rc
+	  # MANAGED RECONCILE first (RomM >= 5.0.0; wired 2026-07-22): the pending queue only sees
+	  # saves captured by a CLEAN quit — a power-off/lid-close mid-game kills the shim's quit
+	  # hook, and that save was invisible to every sync path while "Sync Now" honestly reported
+	  # an empty queue as nothing-to-sync (the Flip FF6 postmortem). --reconcile-library diffs
+	  # the WHOLE local save tree against the server, so uncaptured saves are found and pushed.
+	  # The queue flush still ALWAYS runs after it: reconcile doesn't consume the offline
+	  # pending queue file and the root-menu badge reads its line count, so a successful
+	  # reconcile must still drain the queue (entries it already pushed dedup server-side as
+	  # AlreadyOnServer). Reconcile rc feeds worst only for REAL failures (3 unreachable /
+	  # 4 errors): rc 2 just means the server predates managed sync and the queue flush IS
+	  # the whole sync, exactly as before — no regression on RomM < 5.
+	  "$SYNC_BIN" --reconcile-library;  _rec_rc=$?
+	  "$SYNC_BIN" --push-pending;       rc=$?
+	  [ "$_rec_rc" -ge 3 ] && [ "$_rec_rc" -gt "$rc" ] && rc=$_rec_rc
+	  [ "$rc" -gt "$worst" ] && worst=$rc
 	  # Save-STATES (task: los-statesync): "Sync Now" pushed battery-saves but never STATES.
 	  # --push-all-states pushes every ROM's local states in one call (counts toward $worst so a
 	  # real failure surfaces); --push-pending-states then drains any states queued from offline

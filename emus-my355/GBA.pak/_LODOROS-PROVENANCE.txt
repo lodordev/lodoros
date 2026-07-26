@@ -1,0 +1,22 @@
+LodorOS GBA.pak overlay — my355 (arm64), mGBA core
+
+Purpose: fleet GBA core migration gpsp -> mGBA (Decision 2026-07-13-gba-fleet-mgba),
+so GBA save-states sync fleet-wide. This per-platform pak lands on card as
+Emus/my355/GBA.pak, which MinUI's getEmuPath() resolves BEFORE the shared
+Emus/GBA.pak (armhf) and before the base card's stock Emus/my355/GBA.pak=gpsp
+(common/utils.c: SDCARD_PATH/Emus/<PLATFORM>/<EMU>.pak tried first).
+
+Emulator: mgba_libretro.so — ELF 64-bit aarch64, mgba commit 6dce57e, the
+cross-arch cert-proven build (/mnt/cache/tmp/mgba-cert/build-arm64/), sha256
+92e50b998090d8a4eac9b5cad80b87cbb938926ccc4397c379c7a17ea18be6b7.
+
+launch.sh: byte-identical to lodoros/paks/Emus/MGBA.pak/launch.sh — EMU_EXE=mgba,
+runs mgba_libretro.so via minarch.elf; keeps the lodor #144 LODOR_CORE_OVERRIDE line
+so a per-game core=gpsp sidecar still works. default.cfg: GBA input map, mirrored
+from MGBA.pak.
+
+State dir: minarch writes to {TAG}-{core} = GBA-mgba, matching the my355 statecores
+manifest key gba=mgba:GBA-mgba (release/release.sh assemble_lodoros_update).
+
+Not a standalone-heavy pak — this is a plain libretro pak (no ROMM_STANDALONE_PAK_WRAPPER,
+no pak.json), structurally identical to the shared MGBA.pak.

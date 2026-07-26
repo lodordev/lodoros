@@ -38,6 +38,19 @@ git -C "$ROOT" for-each-ref refs/heads refs/remotes/origin --format='%(refname:s
 VERSION=$(cat "$ROOT/VERSION" 2>/dev/null || true)
 [ -n "$VERSION" ] || fail "VERSION file missing/empty at $ROOT/VERSION"
 
+# ---- fleet-check stamp gate (WS7, 2026-07-22): never assemble an unchecked tree. ----
+# test/fleet-check.sh --stamp writes release/.fleet-check-stamp on a fully green run.
+# Emergency escape: LODOR_SKIP_FLEET_CHECK=1 (loud). The stamp pins the EXACT commit —
+# any new commit (even docs) needs a fresh green run; that is the point, not a bug.
+if [ "${LODOR_SKIP_FLEET_CHECK:-0}" != 1 ]; then
+	_stamp=$(cat "$ROOT/release/.fleet-check-stamp" 2>/dev/null || true)
+	_head=$(git -C "$ROOT" rev-parse "$REF")
+	[ "$_stamp" = "$_head" ] || fail "no fleet-check stamp for $REF ($SHA) — run: sh test/fleet-check.sh --stamp  (emergency: LODOR_SKIP_FLEET_CHECK=1)"
+	echo ">> fleet-check stamp OK for $SHA" >&2
+else
+	echo ">> WARNING: fleet-check stamp gate SKIPPED (LODOR_SKIP_FLEET_CHECK=1)" >&2
+fi
+
 # ---- engine: CGO-free static, per arch AND per host variant (build tags) ----
 # static-go MUST run where readelf exists: the build host may lack binutils (Unraid does),
 # and gate.sh fails closed on a missing readelf instead of passing vacuously — so the gate
@@ -66,6 +79,11 @@ build_engine(){ # <goarch> <goarm-or-empty> <triple> [tags]
 ENG_ARMHF=$(build_engine arm 7 armhf)                    # MinUI/NextUI default (armhf devices)
 ENG_ARM64=$(build_engine arm64 "" arm64)                 # MinUI/NextUI default (arm64 devices)
 ENG_ONION_ARMHF=$(build_engine arm 7 onion-armhf onion)  # OnionOS variant (Miyoo Mini Plus)
+# spruce tag guard (same rationale as knulli below): -tags spruce with no spruce-constrained
+# files would silently ship a default-paths binary labeled spruce — fail LOUD instead.
+grep -rq 'go:build.*spruce' "$ROOT/engine" 2>/dev/null \
+  || fail "spruce engine build tag not found in engine/ — refusing to ship a default-paths binary labeled spruce"
+ENG_SPRUCE_ARMHF=$(build_engine arm 7 spruce-armhf spruce)  # spruceOS variant (Miyoo A30 / Mini Flip)
 ENG_MUOS_ARM64=$(build_engine arm64 "" muos-arm64 muos)  # muOS variant (Allwinner H700, RG34XX)
 # Knulli variant (Batocera-family, arm64). The build TAG must exist in engine/ first:
 # `go build -tags knulli` with no knulli-constrained files would silently compile the
@@ -90,26 +108,31 @@ build_wizard(){ # <goarch> <goarm-or-empty> <triple> [tags]
   echo "$triple $(hash "$bin")"
 }
 WIZARD_ARM64=$(build_wizard arm64 "" arm64 muos)     # muOS + knulli apps (existing name kept)
-WIZ_LOS_ARMHF=$(build_wizard arm 7 los-armhf)        # LodorOS miyoomini/my282 (default tag)
+WIZ_LOS_ARMHF=$(build_wizard arm 7 los-armhf)        # LodorOS miyoomini (default tag)
 WIZ_LOS_ARM64=$(build_wizard arm64 "" los-arm64)     # LodorOS my355 (default tag)
+WIZ_ONION_ARMHF=$(build_wizard arm 7 onion-armhf onion)  # OnionOS launch card (Miyoo Mini/Plus, onion tag)
+WIZ_SPRUCE_ARMHF=$(build_wizard arm 7 spruce-armhf spruce)  # spruceOS onboarding/sync + launch card (armhf, spruce tag)
 
-# ---- OnionOS App on-screen menu: CGO-free static armhf framebuffer renderer (lodor-menu) ----
-# Reuses the muOS-lane ui package (vendored under integrations/onionos/menu); draws /dev/fb0 and
-# reads evdev. Same static-go gate as the engine — nothing ungated reaches a card.
-build_onion_menu(){
-  bin="$OUT/lodor-menu-armhf"
-  docker run --rm -v "$ROOT/integrations/onionos/menu":/src -w /src \
-    -e CGO_ENABLED=0 -e GOARCH=arm -e GOARM=7 \
-    golang:1.25-bookworm \
-    go build -trimpath -ldflags "-s -w" -o /src/.out-menu . 2>&1 | tail -2 || fail "onion menu build"
-  mv "$ROOT/integrations/onionos/menu/.out-menu" "$bin"
-  gate_static_go "$bin"
-  echo "armhf $(hash "$bin")"
-}
-MENU_ARMHF=$(build_onion_menu)
+# lodor-fbhelper (SDL 1.2) — the miyoomini launch-card scanout helper. Raw /dev/fb0 is DEAD on the
+# SSD202D, so the wizard's SDL lane presents through this (same SDL1.2/MI_GFX path as minui.elf).
+# Built with the pinned miyoomini toolchain (armhf/SDL1.2). OPTIONAL: if that image is absent
+# (a host that doesn't build launchers), skip loudly — the card then falls back to its
+# (dead-on-SSD202D) raw-fb lane, exactly as before this helper existed. No other lane uses it.
+FBHELPER_MIYOOMINI=""
+if docker image inspect miyoomini-toolchain >/dev/null 2>&1; then
+  docker run --rm -v "$ROOT/lodoros/fbhelper":/src -v "$OUT":/out -w /src miyoomini-toolchain /bin/bash -lc \
+    'arm-linux-gnueabihf-gcc lodor-fbhelper.c -o /out/lodor-fbhelper-miyoomini -lSDL -lmi_sys -lmi_gfx -lpthread' >&2 \
+    || fail "lodor-fbhelper miyoomini build"
+  [ -f "$OUT/lodor-fbhelper-miyoomini" ] || fail "lodor-fbhelper miyoomini: missing after build"
+  FBHELPER_MIYOOMINI="$OUT/lodor-fbhelper-miyoomini"
+  echo ">> lodor-fbhelper (miyoomini, SDL1.2) built" >&2
+else
+  echo ">> lodor-fbhelper SKIPPED — miyoomini-toolchain image absent (card keeps raw-fb lane on miyoomini)" >&2
+fi
+
 
 # ---- OnionOS release zip: unzip-to-SD-root shape (App/LodorSync/…), gated or nothing ----
-# Stages the TRACKED integration tree + the onion-armhf engine + lodor-menu + the public CA
+# Stages the TRACKED integration tree + the onion-armhf engine + the public CA
 # bundle, strips any live device state (config.json / catalog-index.json / queues / logs —
 # config.json.example stays), hard-gates the staged tree, then zips Lodor-OnionOS-<VER>.zip.
 assemble_onion(){
@@ -119,10 +142,38 @@ assemble_onion(){
   git -C "$ROOT" archive "$REF" integrations/onionos/App | tar -x -C "$stage" --strip-components=2 -f - \
     || fail "onion assemble: git archive of integrations/onionos/App failed"
   [ -d "$app" ] || fail "onion assemble: staged tree missing App/LodorSync"
-  cp "$OUT/lodor-sync-onion-armhf" "$app/lodor-sync"      || fail "onion assemble: engine copy"
-  cp "$OUT/lodor-menu-armhf"       "$app/bin/lodor-menu"  || fail "onion assemble: menu copy"
-  chmod 0755 "$app/lodor-sync" "$app/bin/lodor-menu" "$app/launch.sh" "$app/bin/"*.sh "$app/bin/romm-syncd" 2>/dev/null || true
+  cp "$OUT/lodor-sync-onion-armhf"   "$app/lodor-sync"      || fail "onion assemble: engine copy"
+  cp "$OUT/lodor-wizard-onion-armhf" "$app/lodor-wizard"    || fail "onion assemble: wizard copy (launch-card-v2)"
+  chmod 0755 "$app/lodor-sync" "$app/lodor-wizard" "$app/launch.sh" "$app/bin/"*.sh "$app/bin/romm-syncd" 2>/dev/null || true
+  # the launch card + engine must be the armhf ELF the Mini runs, never a stray host binary
+  file "$app/lodor-sync"   | grep -q "ARM" || fail "onion assemble: lodor-sync is not an ARM binary"
+  file "$app/lodor-wizard" | grep -q "ARM" || fail "onion assemble: lodor-wizard is not an ARM binary"
   [ -f "$app/certs/ca-certificates.crt" ] || fail "onion assemble: CA bundle missing (TLS would fail on-device)"
+  # Handoff manifests (#27, lodor#1 fleet migration) — LIGHTS statesync on the Onion
+  # lane. statecores.json: RomM-fs-slug=core:state-dir, VERSION-LESS tuples (compat
+  # policy keys on core+arch, not version). Onion runs stock RetroArch with
+  # savestate_directory=/mnt/SDCARD/Saves/CurrentProfile/states + sort_savestates_enable=true
+  # (source: OnionUI/Onion static/configs/RetroArch/.retroarch/retroarch.cfg L2964/L3003) —
+  # so states land in states/<CoreDisplayName>/, and the per-system <dir> IS the core
+  # DISPLAY name, exactly like muOS. Cores = Onion stock defaults (platform_onion.go
+  # onionDefaultCore, source-verified): gba=mGBA, nes=FCEUmm, gb/gbc=Gambatte,
+  # gamegear/mastersystem/genesis=Genesis Plus GX. gba=mgba stays VERSIONLESS.
+  #   FLAG (honest orphan, same as muOS): with the fleet-uniform D8 list below NOT
+  #   declaring mgba:armhf or genesis_plus_gx:armhf, the GBA (mgba) and GG/SMS/MD
+  #   (genesis_plus_gx) armhf entries have NO cross-lane D8 bridge — the fleet standard
+  #   is gpsp/picodrive; mgba!=gpsp and genesis_plus_gx!=picodrive so no bridge is
+  #   structurally possible (statecompat.go: `if ca != cb { return false }`). Reality,
+  #   not a regression; mgba:armhf is a separate coordinated wave.
+  sh "$ROOT/release/mkstatecores.sh" --frontend onion --arch armhf --out "$app/statecores.json" \
+    nes=fceumm:FCEUmm gb=gambatte:Gambatte gbc=gambatte:Gambatte \
+    gamegear=genesis_plus_gx:"Genesis Plus GX" mastersystem=genesis_plus_gx:"Genesis Plus GX" genesis=genesis_plus_gx:"Genesis Plus GX" \
+    gba=mgba:mGBA >&2 || fail "onion statecores emit"
+  # D8 whitelist — the fleet-UNIFORM class list, identical on every lane (do NOT add
+  # mgba:armhf here yet — separate coordinated wave).
+  sh "$ROOT/release/mkstatecompat.sh" --out "$app/state-compat.json" \
+    fceumm:armhf,arm64 gambatte:armhf,arm64 picodrive:armhf,arm64 \
+    gpsp:armhf gpsp:arm64 snes9x2005_plus:armhf snes9x2005_plus:arm64 \
+    snes9x:arm64 mgba:arm64 genesis_plus_gx:arm64 >&2 || fail "onion statecompat emit"
   # belt-and-braces device-state strip (the archive is tracked-only, but never trust a tree)
   find "$stage" \( -path "*/data/config.json" -o -name catalog-index.json -o -name mirror-manifest.json \
     -o -name pending-saves.txt -o -name download-queue.txt -o -name last-synced.txt -o -name "*.log" \) \
@@ -143,7 +194,69 @@ assemble_onion(){
   rm -rf "$stage"
   echo "$(basename "$zipf") $(hash "$zipf")"
 }
-if [ "${LODOR_BUILD_ONION:-0}" = 1 ]; then ONION_ZIP=$(assemble_onion); else ONION_ZIP="skipped archived"; echo ">> onion assemble SKIPPED (integration ARCHIVED 2026-07-03; set LODOR_BUILD_ONION=1 to build)" >&2; fi
+# OnionOS is a shipping lane again (un-archived 2026-07-20 — "onion needs to be a lane"):
+# builds unconditionally, same contract as knulli — gated or the whole release fails.
+ONION_ZIP=$(assemble_onion)
+
+# ---- spruceOS release zip: unzip-to-SD-root shape (App/Lodor/...), gated or nothing ----
+# Promoted to a shipping lane 2026-07-22 ("spruce is a platform") — builds unconditionally,
+# same contract as onion/knulli: gated or the whole release fails. Stages the TRACKED
+# integration tree + the spruce-armhf engine + wizard + the public CA bundle, strips live
+# device state, hard-gates the staged tree, then zips Lodor-spruce-<VER>.zip.
+# (Absorbs the bring-up script release/assemble-spruce.sh, now removed.)
+assemble_spruce(){
+  stage="$OUT/.spruce-stage"; app="$stage/App/Lodor"
+  rm -rf "$stage"; mkdir -p "$stage/App"
+  # tracked source only: a working tree can carry live romm-config.json/tokens the zip must never
+  git -C "$ROOT" archive "$REF" integrations/spruce/App | tar -x -C "$stage" --strip-components=2 -f - \
+    || fail "spruce assemble: git archive of integrations/spruce/App failed"
+  [ -d "$app" ] || fail "spruce assemble: staged tree missing App/Lodor"
+  cp "$OUT/lodor-sync-spruce-armhf"   "$app/lodor-sync"   || fail "spruce assemble: engine copy"
+  cp "$OUT/lodor-wizard-spruce-armhf" "$app/lodor-wizard" || fail "spruce assemble: wizard copy"
+  chmod 0755 "$app/lodor-sync" "$app/lodor-wizard" "$app/launch.sh" "$app/lodor_launch.sh" "$app/bin/"* 2>/dev/null || true
+  # the engine + wizard must be the armhf ELFs the device runs, never a stray host binary
+  file "$app/lodor-sync"   | grep -q "ARM" || fail "spruce assemble: lodor-sync is not an ARM binary"
+  file "$app/lodor-wizard" | grep -q "ARM" || fail "spruce assemble: lodor-wizard is not an ARM binary"
+  [ -f "$app/certs/ca-certificates.crt" ] || fail "spruce assemble: CA bundle missing (TLS would fail on-device)"
+  [ -f "$app/romm-config.json.example" ]  || fail "spruce assemble: romm-config.json.example missing"
+  [ -f "$app/config.json" ] || fail "spruce assemble: App manifest config.json missing - app would be invisible in spruce Apps menu"
+  # Handoff manifests (statesync, design D7) — LIGHTS statesync on the spruce lane.
+  # spruce sorts states by BARE libretro core name (platform_spruce.go), so dir = the bare
+  # core, matching LODOR_SAVE_SUBDIR. GBA = mgba per Decisions/2026-07-13-gba-fleet-mgba.md.
+  #   FLAG (unchanged from bring-up): spruce GG/SMS/MD default to genesis_plus_gx while the
+  #   fleet standard is picodrive — no D8 bridge possible, so they are NOT emitted here;
+  #   resolve in a coordinated follow-up wave.
+  sh "$ROOT/release/mkstatecores.sh" --frontend spruce --arch armhf --out "$app/statecores.json" \
+    gba=mgba:mgba >&2 || fail "spruce statecores emit"
+  # D8 whitelist — the fleet-UNIFORM class list, identical on every lane (do NOT add
+  # mgba:armhf here yet — separate coordinated wave).
+  sh "$ROOT/release/mkstatecompat.sh" --out "$app/state-compat.json" \
+    fceumm:armhf,arm64 gambatte:armhf,arm64 picodrive:armhf,arm64 \
+    gpsp:armhf gpsp:arm64 snes9x2005_plus:armhf snes9x2005_plus:arm64 \
+    snes9x:arm64 mgba:arm64 genesis_plus_gx:arm64 >&2 || fail "spruce statecompat emit"
+  # belt-and-braces live-state strip: spruce's ENGINE config is romm-config.json
+  # (LODOR_CONFIG_NAME — App/Lodor/config.json is the spruce app MANIFEST, which stays).
+  find "$stage" \( -name romm-config.json -o -name catalog-index.json -o -name mirror-manifest.json \
+    -o -name pending-saves.txt -o -name download-queue.txt -o -name last-synced.txt -o -name "*.log" \) \
+    -type f -delete 2>/dev/null || true
+  [ -f "$app/romm-config.json.example" ] || fail "spruce assemble: romm-config.json.example missing after strip"
+  # gate/progress chatter -> stderr: this function's STDOUT is captured for the manifest
+  echo ">> spruce gates (staged tree)" >&2
+  sh "$GATE" branding        "$stage" >&2 || fail "spruce zip failed branding gate"
+  sh "$GATE" no-legacy       "$stage" >&2 || fail "spruce zip failed no-legacy gate"
+  sh "$GATE" cruft           "$stage" >&2 || fail "spruce zip failed cruft gate"
+  sh "$GATE" agent-pii       "$stage" >&2 || fail "spruce zip failed agent-pii gate"
+  sh "$GATE" redistributable "$stage" >&2 || fail "spruce zip failed redistributable gate"
+  zipf="$OUT/Lodor-spruce-$VERSION.zip"
+  rm -f "$zipf"
+  ( cd "$stage" && zip -rqX "$zipf" . -x ".DS_Store" ) || fail "spruce zip"
+  ( cd "$OUT" && sha256sum "$(basename "$zipf")" > "$(basename "$zipf").sha256" )
+  rm -rf "$stage"
+  echo "$(basename "$zipf") $(hash "$zipf")"
+}
+# spruce is a shipping lane (promoted 2026-07-22): builds unconditionally, same contract
+# as onion/knulli — gated or the whole release fails.
+SPRUCE_ZIP=$(assemble_spruce)
 
 # ---- muOS release .muxapp: Archive Manager shape ("Lodor/…" at the zip root, the
 # same internal layout as the validated staging build), gated or nothing. Stages the
@@ -194,7 +307,7 @@ assemble_muos(){
   sh "$ROOT/release/mkstatecompat.sh" --out "$app/state-compat.json" \
     fceumm:armhf,arm64 gambatte:armhf,arm64 picodrive:armhf,arm64 \
     gpsp:armhf gpsp:arm64 snes9x2005_plus:armhf snes9x2005_plus:arm64 \
-    snes9x:arm64 mgba:arm64 genesis_plus_gx:arm64 >&2 \
+    snes9x:arm64 mgba:armhf,arm64 genesis_plus_gx:arm64 >&2 \
     || fail "muos statecompat emit"
   # Tailscale (tier-1 sign-in): static aarch64 daemon + CLI, bundled from the staged official
   # build (not committed to git). H700 is arm64. Verify the arch so a wrong-arch stage fails loud.
@@ -202,7 +315,7 @@ assemble_muos(){
   # Hash-pin: the bundled bytes MUST match release/ts-stage.sha256 (the vetted, already-shipping
   # binaries). Presence + `file|grep aarch64` proves arch, NOT provenance -- a swapped-but-aarch64
   # tailscaled would pass those and ship. Fail closed on any drift.
-  ( cd "$TSBIN" && sha256sum -c "$ROOT/release/ts-stage.sha256" ) || fail "muos assemble: tailscale binary hash mismatch vs pinned (release/ts-stage.sha256)"
+  ( cd "$TSBIN" && sha256sum -c "$ROOT/release/ts-stage.sha256" >&2 ) || fail "muos assemble: tailscale binary hash mismatch vs pinned (release/ts-stage.sha256)"
   mkdir -p "$app/bin/tailscale"
   cp "$TSBIN/tailscaled" "$app/bin/tailscale/tailscaled" || fail "muos assemble: tailscaled copy"
   cp "$TSBIN/tailscale"  "$app/bin/tailscale/tailscale"  || fail "muos assemble: tailscale copy"
@@ -276,12 +389,12 @@ assemble_knulli(){
   sh "$ROOT/release/mkstatecompat.sh" --out "$app/state-compat.json" \
     fceumm:armhf,arm64 gambatte:armhf,arm64 picodrive:armhf,arm64 \
     gpsp:armhf gpsp:arm64 snes9x2005_plus:armhf snes9x2005_plus:arm64 \
-    snes9x:arm64 mgba:arm64 genesis_plus_gx:arm64 >&2 || fail "knulli statecompat emit"
+    snes9x:arm64 mgba:armhf,arm64 genesis_plus_gx:arm64 >&2 || fail "knulli statecompat emit"
   # Tailscale (tier-1 sign-in): static aarch64 daemon + CLI, bundled from the staged
   # official build (not committed to git). Verify the arch so a wrong stage fails loud.
   [ -x "$TSBIN/tailscaled" ] && [ -x "$TSBIN/tailscale" ] || fail "knulli assemble: tailscale binaries not found in TSBIN=$TSBIN"
   # Hash-pin (see muos site): bundled bytes must match the vetted release/ts-stage.sha256.
-  ( cd "$TSBIN" && sha256sum -c "$ROOT/release/ts-stage.sha256" ) || fail "knulli assemble: tailscale binary hash mismatch vs pinned (release/ts-stage.sha256)"
+  ( cd "$TSBIN" && sha256sum -c "$ROOT/release/ts-stage.sha256" >&2 ) || fail "knulli assemble: tailscale binary hash mismatch vs pinned (release/ts-stage.sha256)"
   mkdir -p "$app/bin/tailscale"
   cp "$TSBIN/tailscaled" "$app/bin/tailscale/tailscaled" || fail "knulli assemble: tailscaled copy"
   cp "$TSBIN/tailscale"  "$app/bin/tailscale/tailscale"  || fail "knulli assemble: tailscale copy"
@@ -378,9 +491,9 @@ assemble_android(){
   echo "$apk $(hash "$OUT/$apk")"
 }
 # Android APK requires the release keystore (+ pass), which is intentionally NOT on
-# every build host — a dev/test build on a host without it can skip this ONE lane the
-# same way onion is skipped, without abandoning "all platforms or nothing" for a real
-# release (default stays 1; a publish host has the keystore and builds it).
+# every build host — a dev/test build on a host without it can skip this ONE lane
+# without abandoning "all platforms or nothing" for a real release (default stays 1;
+# a publish host has the keystore and builds it).
 if [ "${LODOR_BUILD_ANDROID:-1}" = 1 ]; then ANDROID_APK=$(assemble_android); else ANDROID_APK="skipped (LODOR_BUILD_ANDROID=0)"; echo ">> android assemble SKIPPED (LODOR_BUILD_ANDROID=0 — no release keystore on this host)" >&2; fi
 
 # ---- LodorOS self-update overlay zips (the ONLY lane with bespoke apply — no store exists
@@ -398,14 +511,43 @@ assemble_lodoros_update(){ # <plat> <engine-triple>
     || fail "lodoros-update $p: git archive of lodoros/paks/Lodor.pak failed"
   git -C "$ROOT" archive "$REF" "lodoros/paks/Update Lodor.pak" | tar -x -C "$stage/Tools/$p" --strip-components=2 -f - \
     || fail "lodoros-update $p: git archive of lodoros/paks/'Update Lodor.pak' failed"
+  # miyoomini SDL scanout self-test pak (diagnostic, 2026-07-24): a one-boot check that lodor-fbhelper
+  # scans out from a standalone process — the one unproven unknown behind the launch card. Ships only
+  # where the helper does (miyoomini); harmless elsewhere but omitted to keep other overlays minimal.
+  if [ "$p" = miyoomini ]; then
+    git -C "$ROOT" archive "$REF" "lodoros/paks/SDL Test.pak" | tar -x -C "$stage/Tools/$p" --strip-components=2 -f - \
+      || fail "lodoros-update $p: git archive of lodoros/paks/'SDL Test.pak' failed"
+    [ -f "$stage/Tools/$p/SDL Test.pak/launch.sh" ] || fail "lodoros-update $p: SDL Test.pak missing"
+    chmod 0755 "$stage/Tools/$p/SDL Test.pak/launch.sh" 2>/dev/null || true
+  fi
   [ -d "$pak" ] || fail "lodoros-update $p: staged tree missing Lodor.pak"
   [ -f "$stage/Tools/$p/Update Lodor.pak/launch.sh" ] || fail "lodoros-update $p: Update Lodor.pak missing"
   [ -x "$pak/bin/lodor-apply-update" ] || chmod +x "$pak/bin/lodor-apply-update" 2>/dev/null || true
   [ -f "$pak/bin/lodor-apply-update" ] || fail "lodoros-update $p: boot applier missing from pak"
+  # DELIVERY (Decision 2026-07-13-gba-fleet-mgba): the overlay ALSO ships the statecores
+  # manifest saying gba=mgba (inside Lodor.pak, above). If a self-updated card kept its stock
+  # gpsp GBA.pak, it would upload gpsp-format states tagged mgba and POISON the fleet. So carry
+  # the mgba GBA.pak in the SAME overlay so manifest + core migrate ATOMICALLY. Land it at the
+  # per-platform Emus/<plat>/GBA.pak path, which getEmuPath (common/utils.c:105) resolves FIRST
+  # — ahead of the shared Emus/GBA.pak AND the base card's stock per-platform gpsp GBA.pak — so
+  # it deterministically wins core resolution on EVERY platform. Source = lodoros/emus-<plat>/
+  # GBA.pak (arch-correct mgba core: armhf for the Miyoos, arm64 for the Flip V2).
+  mkdir -p "$stage/Emus/$p"
+  git -C "$ROOT" archive "$REF" "lodoros/emus-$p/GBA.pak" | tar -x -C "$stage/Emus/$p" --strip-components=2 -f - \
+    || fail "lodoros-update $p: git archive of lodoros/emus-$p/GBA.pak failed (mgba GBA overlay)"
+  [ -f "$stage/Emus/$p/GBA.pak/launch.sh" ] || fail "lodoros-update $p: mgba GBA.pak overlay missing launch.sh"
+  [ -f "$stage/Emus/$p/GBA.pak/mgba_libretro.so" ] || fail "lodoros-update $p: mgba GBA.pak overlay missing mgba_libretro.so"
   cp "$OUT/lodor-sync-$triple" "$pak/lodor-sync" || fail "lodoros-update $p: engine copy ($triple)"
   # Launch card (task #24): default-tagged wizard, arch-matched to the engine. Pak root,
   # same convention as the muOS/knulli apps; romm-session-sync no-ops honestly without it.
   cp "$OUT/lodor-wizard-los-$triple" "$pak/lodor-wizard" || fail "lodoros-update $p: wizard copy (los-$triple)"
+  # miyoomini launch-card scanout helper (SDL 1.2): raw /dev/fb0 is dead on the SSD202D, so the
+  # wizard's SDL lane needs this to present. Ships to bin/; romm-session-sync gates on its presence
+  # and only exports LODOR_FBHELPER for miyoomini. Absent (toolchain skipped) => raw-fb lane.
+  if [ "$p" = miyoomini ] && [ -n "$FBHELPER_MIYOOMINI" ]; then
+    cp "$FBHELPER_MIYOOMINI" "$pak/bin/lodor-fbhelper" || fail "lodoros-update $p: fbhelper copy"
+    chmod 0755 "$pak/bin/lodor-fbhelper"
+  fi
   # Handoff manifests (#27) — LIGHTS statesync on LodorOS. The 0.9.7 engine (copied
   # above) carries the state verbs; 0.9.6 predated them, so this manifest + a 0.9.7
   # binary is the whole bump. dir = minarch {TAG}-{core} under .userdata/shared/
@@ -413,7 +555,7 @@ assemble_lodoros_update(){ # <plat> <engine-triple>
   # (genesis/mastersystem/psx, verified live). --arch = $triple verbatim (armhf|arm64);
   # dirs are arch-independent. gpsp/snes9x2005_plus hand off within-bitness-group only.
   #
-  # #12 — SNES core is ARCH-SPLIT (fix 2026-07-09). The armhf Miyoos (miyoomini/my282)
+  # #12 — SNES core is ARCH-SPLIT (fix 2026-07-09). The armhf Miyoos (miyoomini)
   # run snes9x2005_plus (snes9x-current is too heavy for armhf — xarch-cert README). The
   # arm64 my355 (Flip V2) is capable of the FULL snes9x, which is the arm64 fleet SNES
   # standard (Knulli/NextUI/Android, and muOS post-#11). Emitting snes9x2005_plus for ALL
@@ -425,12 +567,15 @@ assemble_lodoros_update(){ # <plat> <engine-triple>
   #   confirmed on my355 hardware (see flagged-cells list). N64: LodorOS runs STANDALONE
   #   mupen64plus (emus-*/N64.pak launch.real.sh — NOT a libretro core), which produces NO
   #   libretro save-states, so N64 is correctly ABSENT here (nothing state-syncable). GBA=
-  #   gpsp is the MinUI base core; muOS/Knulli/Android run mgba → cross-lane GBA orphan,
-  #   flagged fleet-wide (gpsp!=mgba, no D8 bridge possible).
+  #   mgba on LodorOS too now (Decision 2026-07-13-gba-fleet-mgba): a GBA.pak overlay ships
+  #   the mgba core — shared armhf Emus/GBA.pak for the Miyoos, per-platform arm64
+  #   Emus/my355/GBA.pak for the Flip V2 — so (GBA) folders run mgba fleet-wide and GBA
+  #   save-states sync across muOS/Knulli/Android/LodorOS (all mgba). Cross-BITNESS mgba
+  #   (armhf↔arm64) is now certified cross-bitness — state-compat ships mgba:armhf,arm64 (CERTIFIED 2026-07-14 cross-build cert, diff=0).
   if [ "$triple" = arm64 ]; then SNES_CORE=snes9x; else SNES_CORE=snes9x2005_plus; fi
   sh "$ROOT/release/mkstatecores.sh" --frontend lodoros --arch "$triple" --out "$pak/statecores.json" \
     nes=fceumm:FC-fceumm gb=gambatte:GB-gambatte gbc=gambatte:GBC-gambatte \
-    gba=gpsp:GBA-gpsp gamegear=picodrive:GG-picodrive \
+    gba=mgba:GBA-mgba gamegear=picodrive:GG-picodrive \
     mastersystem=picodrive:SMS-picodrive genesis=picodrive:MD-picodrive \
     "snes=$SNES_CORE:SFC-$SNES_CORE" psx=pcsx_rearmed:PS-pcsx_rearmed >&2 \
     || fail "lodoros-update $p statecores emit"
@@ -438,7 +583,7 @@ assemble_lodoros_update(){ # <plat> <engine-triple>
   sh "$ROOT/release/mkstatecompat.sh" --out "$pak/state-compat.json" \
     fceumm:armhf,arm64 gambatte:armhf,arm64 picodrive:armhf,arm64 \
     gpsp:armhf gpsp:arm64 snes9x2005_plus:armhf snes9x2005_plus:arm64 \
-    snes9x:arm64 mgba:arm64 genesis_plus_gx:arm64 >&2 \
+    snes9x:arm64 mgba:armhf,arm64 genesis_plus_gx:arm64 >&2 \
     || fail "lodoros-update $p statecompat emit"
   chmod 0755 "$pak/lodor-sync" "$pak/lodor-wizard" "$pak/launch.sh" "$pak/install.sh" "$pak/uninstall.sh" \
     "$pak"/bin/* "$pak"/lib/*.sh "$stage/Tools/$p/Update Lodor.pak/launch.sh" 2>/dev/null || true
@@ -448,6 +593,24 @@ assemble_lodoros_update(){ # <plat> <engine-triple>
   find "$stage" \( -name config.json -o -name settings.conf -o -name catalog-index.json \
     -o -name mirror-manifest.json -o -name pending-saves.txt -o -name download-queue.txt \
     -o -name last-synced.txt -o -name "*.log" -o -name ".pii-terms.conf" \) -type f -delete 2>/dev/null || true
+  # Pre-ship declared==launched gate (Decision 2026-07-13-gba-fleet-mgba): the manifest-vs-core
+  # POISONING class. For every system this platform declares core=mgba in statecores.json, the
+  # GBA.pak we actually ship in THIS overlay must launch that SAME core (EMU_EXE=mgba). If they
+  # disagree, a self-updated card would upload states tagged one core but produced by another ->
+  # fleet poison. Fail the build LOUD rather than ship a mismatched pair. (Keyed on the declared
+  # core, so any future mgba-declared system is checked the same way; today that is gba.)
+  DECLARED_GBA_CORE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["systems"].get("gba",{}).get("core",""))' "$pak/statecores.json") \
+    || fail "lodoros-update $p: could not read gba core from statecores.json"
+  if [ "$DECLARED_GBA_CORE" = mgba ]; then
+    gbalaunch="$stage/Emus/$p/GBA.pak/launch.sh"
+    [ -f "$gbalaunch" ] || fail "declared==launched gate ($p): statecores declares gba=mgba but no Emus/$p/GBA.pak/launch.sh shipped in overlay"
+    if ! grep -Eq '^[[:space:]]*EMU_EXE=mgba([[:space:]]|$)' "$gbalaunch"; then
+      launched=$(grep -E '^[[:space:]]*EMU_EXE=' "$gbalaunch" | head -1)
+      echo "declared==launched MISMATCH ($p): statecores gba core=mgba but $gbalaunch has: ${launched:-<no EMU_EXE= line>}" >&2
+      fail "declared==launched gate ($p): shipped GBA.pak does NOT launch mgba (manifest/core poison risk)"
+    fi
+    echo ">> declared==launched OK ($p): gba=mgba and Emus/$p/GBA.pak launch.sh sets EMU_EXE=mgba" >&2
+  fi
   echo ">> lodoros-update gates ($p)" >&2
   sh "$GATE" branding        "$stage" >&2 || fail "lodoros-update $p failed branding gate"
   sh "$GATE" no-legacy       "$stage" >&2 || fail "lodoros-update $p failed no-legacy gate"
@@ -462,7 +625,6 @@ assemble_lodoros_update(){ # <plat> <engine-triple>
   echo "$(basename "$zipf") $(hash "$zipf")"
 }
 LOSU_MIYOOMINI=$(assemble_lodoros_update miyoomini armhf)
-LOSU_MY282=$(assemble_lodoros_update my282 armhf)
 LOSU_MY355=$(assemble_lodoros_update my355 arm64)
 
 # ---- LodorOS full-card image (the flashable OS zip) — composed from a BASE card (proven
@@ -503,16 +665,15 @@ fi
   echo "{"
   echo "  \"commit\": \"$(git rev-parse "$REF")\","
   echo "  \"ref\": \"$REF\","
-  echo "  \"engine\": {\"armhf\": \"${ENG_ARMHF##* }\", \"arm64\": \"${ENG_ARM64##* }\", \"onion-armhf\": \"${ENG_ONION_ARMHF##* }\", \"muos-arm64\": \"${ENG_MUOS_ARM64##* }\", \"knulli-arm64\": \"${ENG_KNULLI_ARM64##* }\", \"android-arm64\": \"${ENG_ANDROID_ARM64##* }\"},"
-  echo "  \"wizard\": {\"arm64\": \"${WIZARD_ARM64##* }\"},"
-  echo "  \"onion_menu\": {\"armhf\": \"${MENU_ARMHF##* }\"},"
+  echo "  \"engine\": {\"armhf\": \"${ENG_ARMHF##* }\", \"arm64\": \"${ENG_ARM64##* }\", \"onion-armhf\": \"${ENG_ONION_ARMHF##* }\", \"spruce-armhf\": \"${ENG_SPRUCE_ARMHF##* }\", \"muos-arm64\": \"${ENG_MUOS_ARM64##* }\", \"knulli-arm64\": \"${ENG_KNULLI_ARM64##* }\", \"android-arm64\": \"${ENG_ANDROID_ARM64##* }\"},"
+  echo "  \"wizard\": {\"arm64\": \"${WIZARD_ARM64##* }\", \"los-armhf\": \"${WIZ_LOS_ARMHF##* }\", \"los-arm64\": \"${WIZ_LOS_ARM64##* }\", \"onion-armhf\": \"${WIZ_ONION_ARMHF##* }\", \"spruce-armhf\": \"${WIZ_SPRUCE_ARMHF##* }\"},"
   echo "  \"onion_zip\": {\"$(echo "$ONION_ZIP" | cut -d" " -f1)\": \"${ONION_ZIP##* }\"},"
+  echo "  \"spruce_zip\": {\"$(echo "$SPRUCE_ZIP" | cut -d" " -f1)\": \"${SPRUCE_ZIP##* }\"},"
   echo "  \"muos_muxapp\": {\"$(echo "$MUOS_MUXAPP" | cut -d" " -f1)\": \"${MUOS_MUXAPP##* }\"},"
   echo "  \"knulli_zip\": {\"$(echo "$KNULLI_ZIP" | cut -d" " -f1)\": \"${KNULLI_ZIP##* }\"},"
   echo "  \"android_apk\": {\"$(echo "$ANDROID_APK" | cut -d" " -f1)\": \"${ANDROID_APK##* }\"},"
   echo "  \"lodoros_update\": {"
   echo "    \"miyoomini\": {\"$(echo "$LOSU_MIYOOMINI" | cut -d" " -f1)\": \"${LOSU_MIYOOMINI##* }\"},"
-  echo "    \"my282\": {\"$(echo "$LOSU_MY282" | cut -d" " -f1)\": \"${LOSU_MY282##* }\"},"
   echo "    \"my355\": {\"$(echo "$LOSU_MY355" | cut -d" " -f1)\": \"${LOSU_MY355##* }\"}"
   echo "  },"
   echo "  \"fullcard\": \"$FULLCARD\","

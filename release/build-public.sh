@@ -99,7 +99,7 @@ sh "$GATE" branding        "$STAGE"
 # this gate was not wired here, so the clobber shipped). Platform list = every launcher-ready platform
 # that survives the strips above; a platform later dropped from the zip must be dropped HERE too (the
 # gate failing loudly on its absence is the intended failure mode).
-sh "$GATE" shim-coverage   "$STAGE" "${LODOR_SHIM_PLATS:-miyoomini my282 my355}"
+sh "$GATE" shim-coverage   "$STAGE" "${LODOR_SHIM_PLATS:-miyoomini my355}"
 # cruft: no *-bak deploy backups / rg40xxcube fossil in the zip (0.9.1 shipped 27 bak binaries
 # + the fossil — deploy backups belong on the CARD, never in a release).
 sh "$GATE" cruft           "$STAGE"

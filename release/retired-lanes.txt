@@ -1,0 +1,7 @@
+# retired-lanes.txt — asset keys mkversions.sh must DROP from every channel of versions.json.
+# One key per line; '#' comments. A lane goes here when it leaves the build (release.sh) —
+# otherwise #19's merge-forward re-advertises its stale asset forever, pinned to an old release
+# tag, and gate.sh update-manifest aborts every publish (the F1/F3 blocker, 2026-07-18).
+# Retired devices keep working (engine + save sync); they just stop being offered LodorOS updates
+# (the freeze-aware --check-update reports update=0 when a lane's asset is absent).
+lodoros-my282

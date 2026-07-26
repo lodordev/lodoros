@@ -19,6 +19,15 @@
 #                                            NUMERIC components alone — the NextUI Pak Store ignores
 #                                            prerelease suffixes ("0.9.1-beta" compares as 0.9.1), so a
 #                                            suffix-only bump ships a release the store never offers
+#   gate.sh state-recert <state-compat.json> [matrix.json]   certification-facts gate: every class
+#                                            the whitelist claims must be green in the newest
+#                                            committed release/xarch-cert/matrix-*.json. Cross-arch
+#                                            classes need BOTH directions PASS (armhf->arm64 AND
+#                                            arm64->armhf); single-arch classes need their a->a
+#                                            round-trip line. Any FAIL row on a claimed pair, or a
+#                                            claim with no PASS row, or no matrix at all = hard FAIL.
+#                                            The whitelist is certification FACTS, not wishes — this
+#                                            is what stops it drifting past what was ever proven.
 #   gate.sh update-manifest <versions.json> [tag]   schema-1 sanity for the self-update manifest:
 #                                            versions parse, every asset has an https URL + 64-hex
 #                                            sha256 + size>0; with [tag], every URL points at that
@@ -137,7 +146,7 @@ cmd_elf(){
 # device toolchain) don't false-fail a partial-but-correct staging tree.
 cmd_wifi_coverage(){
   card=${1:?usage: gate.sh wifi-coverage <card-root> [platforms]}
-  plats=${2:-"miyoomini my282 my355 rg35xxplus zero28 magicmini"}
+  plats=${2:-"miyoomini my355 rg35xxplus zero28 magicmini"}
   miss=""
   for p in $plats; do
     [ -x "$card/Tools/$p/Wifi.pak/bin/service-on" ] || miss="$miss $p"
@@ -166,7 +175,7 @@ cmd_no_legacy(){
 # portable tools (grep + magic-byte read) so it runs on the build host without binutils.
 cmd_shim_coverage(){
   card=${1:?usage: gate.sh shim-coverage <card-or-staging-root> [platforms]}
-  plats=${2:-"miyoomini my282 my355 rg35xxplus"}
+  plats=${2:-"miyoomini my355 rg35xxplus"}
   bad=""
   for p in $plats; do
     shf="$card/.system/$p/bin/minarch.elf"
@@ -292,13 +301,19 @@ cmd_store_version(){
 # malformed here bricks the update path quietly (engine treats a bad manifest as unreachable),
 # so publishing gates on shape: schema 1, parseable versions, https URLs, 64-hex hashes,
 # non-zero sizes — and, given the tag, URL-pinning to exactly that release.
+#
+# [channel] scopes the tag-pin assertion to the ONE channel this run publishes. Every channel
+# still gets the shape checks; only the published channel must point at <tag>. Omit it to keep
+# the historical every-channel behaviour.
 cmd_update_manifest(){
-  mf=${1:?usage: gate.sh update-manifest <versions.json> [tag]}
+  mf=${1:?usage: gate.sh update-manifest <versions.json> [tag] [channel]}
   tag=${2:-}
+  chan=${3:-}
   [ -f "$mf" ] || fail "update-manifest: no such file: $mf"
-  python3 - "$mf" "$tag" <<'PY' || exit 1
+  case "${chan:-stable}" in stable|beta) ;; *) fail "update-manifest: unknown channel '$chan' (stable|beta)";; esac
+  python3 - "$mf" "$tag" "$chan" <<'PY' || exit 1
 import json, re, sys
-mf, tag = sys.argv[1], sys.argv[2]
+mf, tag, chan = sys.argv[1], sys.argv[2], sys.argv[3]
 m = json.load(open(mf))
 assert m.get("schema") == 1, f"schema {m.get('schema')} != 1"
 seen = 0
@@ -313,12 +328,18 @@ for ch in ("stable", "beta"):
         assert a.get("url", "").startswith("https://"), f"{ch}/{key}: non-https url"
         assert re.fullmatch(r"[0-9a-f]{64}", a.get("sha256", "")), f"{ch}/{key}: bad sha256"
         assert isinstance(a.get("size"), int) and a["size"] > 0, f"{ch}/{key}: size must be > 0"
-        if tag:
+        # A --beta publish merges its new beta assets into the LIVE manifest, whose stable
+        # assets stay pinned to their OWN (older) release tag by design. Asserting the new tag
+        # across every channel therefore made a beta publish structurally impossible — it
+        # aborted on the untouched stable channel (found cutting 1.0.0-beta1, 2026-07-25).
+        # Pin only the channel being published; the rest are shape-checked, not tag-checked.
+        if tag and (not chan or ch == chan):
             assert f"/releases/download/{tag}/" in a["url"], f"{ch}/{key}: url not pinned to {tag}"
 assert seen > 0, "manifest names no assets"
 for k, v in (m.get("notify") or {}).items():
     assert re.fullmatch(r"\d+(\.\d+){0,3}(-[0-9A-Za-z.]+)?", v), f"notify/{k}: bad version {v!r}"
-print(f"  ok: update-manifest: schema 1, {seen} asset(s) well-formed" + (f", pinned to {tag}" if tag else ""))
+print(f"  ok: update-manifest: schema 1, {seen} asset(s) well-formed"
+      + (f", {chan or 'every'} channel pinned to {tag}" if tag else ""))
 PY
 }
 
@@ -412,14 +433,60 @@ $_f"
 cmd_repo_parity(){
   ver=${1:?usage: gate.sh repo-parity <version>}
   bad=""
-  for r in lodor lodoros lodor-muos lodor-knulli lodor-nextui; do
+  for r in lodor lodoros lodor-muos lodor-knulli lodor-onionos lodor-spruce lodor-nextui; do
     tag=$(curl -sf "https://api.github.com/repos/lodordev/$r/releases/latest" \
       | python3 -c "import json,sys;print(json.load(sys.stdin).get('tag_name',''))" 2>/dev/null || true)
     want="v$ver"; [ "$r" = lodor-nextui ] && want="$ver"
     [ "$tag" = "$want" ] || bad="$bad $r=${tag:-none}"
   done
   [ -z "$bad" ] || fail "repo-parity: lane repos not at $ver:$bad (run release/publish-lanes.sh)"
-  ok "repo-parity: all five lane repos at $ver"
+  ok "repo-parity: all seven lane repos at $ver"
+}
+
+# state-recert: hold state-compat.json accountable to the newest committed xarch-cert matrix.
+# A claimed class with no green line is a certification claim nobody ever proved — hard fail.
+cmd_state_recert(){
+  compat=${1:?usage: gate.sh state-recert <state-compat.json> [matrix.json]}
+  [ -f "$compat" ] || fail "state-recert: no such whitelist: $compat"
+  matrix=${2:-}
+  if [ -z "$matrix" ]; then
+    matrix=$(ls "$ROOT"/release/xarch-cert/matrix-*.json 2>/dev/null | sort | tail -1 || true)
+    [ -n "$matrix" ] || fail "state-recert: no committed release/xarch-cert/matrix-*.json — run release/xarch-cert/recert.sh first"
+  fi
+  [ -f "$matrix" ] || fail "state-recert: no such matrix: $matrix"
+  if python3 - "$compat" "$matrix" <<'PY'
+import json, sys, itertools
+compat = json.load(open(sys.argv[1]))
+matrix = json.load(open(sys.argv[2]))
+assert compat.get("version") == 1 and matrix.get("version") == 1, "unknown schema version"
+rows = matrix["rows"]
+bad = []
+for cl in compat["classes"]:
+    core, arches = cl["core"], cl["arches"]
+    if len(arches) == 1:
+        need = [f"{arches[0]}->{arches[0]}"]
+    else:  # cross-arch class: every ordered pair of distinct arches must be proven
+        need = [f"{a}->{b}" for a, b in itertools.permutations(arches, 2)]
+    for pair in need:
+        hits = [r for r in rows if r["core"] == core and r["pair"] == pair]
+        fails = [r for r in hits if r["verdict"] in ("FAIL", "ERROR")]
+        passes = [r for r in hits if r["verdict"] == "PASS"]
+        if fails:
+            bad.append(f"{core} {pair}: matrix says {fails[0]['verdict']} — {fails[0]['evidence']}")
+        elif not passes:
+            ev = hits[0]["evidence"] if hits else "no matrix line at all"
+            bad.append(f"{core} {pair}: claimed but never certified ({ev})")
+        else:
+            print(f"  ok: {core} {pair} — {passes[0]['evidence']}")
+if bad:
+    print(f"state-recert: {sys.argv[1]} claims exceed certification (matrix: {sys.argv[2]}):", file=sys.stderr)
+    for b in bad:
+        print(f"  NOT CERTIFIED: {b}", file=sys.stderr)
+    sys.exit(1)
+print(f"  matrix: {sys.argv[2]} (date {matrix.get('date','?')}, repo {matrix.get('repo_commit','?')})")
+PY
+  then :; else fail "state-recert: whitelist claims a class with no green line in $matrix"; fi
+  ok "state-recert: every claimed class is backed by the certification matrix"
 }
 
 case "${1:-}" in
@@ -439,5 +506,6 @@ case "${1:-}" in
   update-manifest) shift; cmd_update_manifest "$@";;
   secrets) shift; cmd_secrets "$@";;
   repo-parity) shift; cmd_repo_parity "$@";;
-  *) echo "usage: gate.sh {contract|branding <dir>|static-go <bin>|elf <bin> [--max-glibc X.Y] [--symbol SYM]...|wifi-coverage <card-root> [platforms]|no-legacy <dir>|shim-coverage <card-root> [platforms]|redistributable <dir>|cruft <dir>|agent-pii <dir>|store-version <new> <published>|secrets <dir>|repo-parity <version>}"; exit 2;;
+  state-recert) shift; cmd_state_recert "$@";;
+  *) echo "usage: gate.sh {contract|branding <dir>|static-go <bin>|elf <bin> [--max-glibc X.Y] [--symbol SYM]...|wifi-coverage <card-root> [platforms]|no-legacy <dir>|shim-coverage <card-root> [platforms]|redistributable <dir>|cruft <dir>|agent-pii <dir>|store-version <new> <published>|secrets <dir>|repo-parity <version>|state-recert <state-compat.json> [matrix.json]}"; exit 2;;
 esac

@@ -5,13 +5,13 @@
 # briefly then DROPS, leaving wlan0 up with a STALE IP. The old _radio_ready gated on
 # up+IP ALONE, so it returned a FALSE POSITIVE on the wedged link — wifi_acquire
 # short-circuited past service-on and the my355 drop-recovery, and a fresh card never
-# had its wpa_supplicant.conf generated. The fix ($PLAT-gated so miyoomini/my282 are
+# had its wpa_supplicant.conf generated. The fix ($PLAT-gated so miyoomini is
 # byte-for-byte unchanged): on my355, _radio_ready ALSO requires wpa_state=COMPLETED,
 # and _wifi_write_config now runs for my355.
 #
 # This proves, with NO hardware and NO root writes, the three fixed facts:
 #   1. TRUTH TABLE — given wlan0 up + stale IP + wpa_state!=COMPLETED:
-#        _radio_ready is FALSE for my355, TRUE for miyoomini and my282.
+#        _radio_ready is FALSE for my355, TRUE for miyoomini.
 #   2. POSITIVE — my355 with wpa_state=COMPLETED is READY (the fix doesn't over-block).
 #   3. WRITE-CONFIG — _wifi_write_config runs for my355, generates a wpa_supplicant.conf
 #        pinning ctrl_interface=/var/run/wpa_supplicant + one network{} block from
@@ -70,9 +70,6 @@ r=$(radio_ready_for my355 ASSOCIATING)
 r=$(radio_ready_for miyoomini ASSOCIATING)
 [ "$r" = READY ] && pass "miyoomini up+IP -> ready (unchanged up+IP predicate)" \
 	|| fail "miyoomini up+IP -> $r (want READY)"
-r=$(radio_ready_for my282 ASSOCIATING)
-[ "$r" = READY ] && pass "my282 up+IP -> ready (unchanged up+IP predicate)" \
-	|| fail "my282 up+IP -> $r (want READY)"
 
 say "== 2. POSITIVE: my355 with wpa_state=COMPLETED is ready =="
 r=$(radio_ready_for my355 COMPLETED)

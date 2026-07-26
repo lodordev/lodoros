@@ -175,12 +175,29 @@ romm_wifi_up() {
 	ip addr show wlan0 2>/dev/null | grep -q "inet " || return 1
 	return 0
 }
-if [ -x "$HELPER" ] && [ -n "$ROM" ] && romm_wifi_up; then
-	if command -v timeout >/dev/null 2>&1; then
-		timeout 20 "$HELPER" pull "$ROM" >/dev/null 2>&1
-	else
-		"$HELPER" pull "$ROM" >/dev/null 2>&1
-	fi
+# busybox `timeout` arg format varies across Miyoo builds — new `timeout N cmd` vs old `timeout -t N cmd`.
+# A wrong-format call silently fails to launch cmd (the launch-card never fired). Probe once, dispatch,
+# and fall back to running unbounded if neither works (better an unbounded card than no card).
+_lodor_timeout() {
+	_lt_s=$1; shift
+	if timeout 1 true 2>/dev/null; then timeout "$_lt_s" "$@"
+	elif timeout -t 1 true 2>/dev/null; then timeout -t "$_lt_s" "$@"
+	else "$@"; fi
+}
+if [ -f "$HELPER" ] && [ -n "$ROM" ]; then
+	# CACHE-FIRST launch card (2026-07-23): the card shows on EVERY launch, not just when WiFi is up.
+	#   WiFi UP   -> "pull" (warm link: live server saves/states + the opportunistic save pull).
+	#   WiFi DOWN -> "card" (render from LOCAL CACHE; the radio is NEVER cold-brought-up).
+	# Either way the card draws — the old romm_wifi_up gate meant a cold launch got no card at all.
+	# It is interactive, so the cap is longer than the old 20s pull; a missing HELPER or any failure
+	# still falls through to the launch below (never blocked).
+	if romm_wifi_up; then _lcphase=pull; else _lcphase=card; fi
+	# rc4 DIAGNOSTIC (2026-07-24): prove the shim reaches the card call + report the helper guard (x vs f).
+	# rc5: format-agnostic timeout + probe which busybox format works + capture the helper's rc.
+	_tn=$(timeout 1 true 2>/dev/null && echo 1 || echo 0); _to=$(timeout -t 1 true 2>/dev/null && echo 1 || echo 0)
+	echo "$(date '+%F %T') [shim] pre-card helper_f=$([ -f "$HELPER" ] && echo 1 || echo 0) timeout_new=$_tn timeout_old=$_to phase=$_lcphase rom=$ROM" >> "$SDCARD/Tools/$PLAT/Lodor.pak/session.log" 2>/dev/null
+	_lodor_timeout 120 "$HELPER" "$_lcphase" "$ROM" >/dev/null 2>&1; _hrc=$?
+	echo "$(date '+%F %T') [shim] card-done helper_rc=$_hrc" >> "$SDCARD/Tools/$PLAT/Lodor.pak/session.log" 2>/dev/null
 fi
 
 # Playtime session bracket (task #146): stage the session before launch, record it after.

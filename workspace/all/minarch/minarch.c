@@ -4657,6 +4657,16 @@ static int Flashback_run(const char* rom_name) {
 	snprintf(rrun,sizeof(rrun),"%s/Tools/%s/Lodor.pak/bin/romm-run",SDCARD_PATH,PLATFORM);
 	fb_shq(game.path,pathq,sizeof(pathq));
 
+	// lodor (1.0): the Flashback timeline lives on the server; --list-saves runs through romm-run,
+	// which brings Wi-Fi up in the FOREGROUND. Offline that blocks, then reports an empty result as
+	// "No save points yet" — the "bugs out and does nothing" report. Gate on PLAT_isOnline() so
+	// offline degrades honestly instead of hanging and lying. (Offline timeline + restore from a
+	// local cache is the follow-on; a cache-first read slots in right here.)
+	if (!PLAT_isOnline()) {
+		fb_msg("Flashback needs Wi-Fi.\nConnect, sync, then try again.");
+		return 0;
+	}
+
 	GFX_clear(screen); GFX_blitMessage(font.large,"Loading save points...",screen,&(SDL_Rect){0,0,screen->w,screen->h}); GFX_flip(screen);
 	snprintf(cmd,sizeof(cmd),"'%s' --list-saves %s > /tmp/lodor-fb.txt 2>/dev/null",rrun,pathq);
 	system(cmd);

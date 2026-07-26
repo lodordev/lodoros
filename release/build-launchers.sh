@@ -59,7 +59,7 @@ ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 OUT="${1:?usage: build-launchers.sh <OUT_DIR> [<git-ref>]}"
 REF="${2:-HEAD}"
 SHORTSHA=$(git -C "$ROOT" rev-parse --short "$REF")
-PLATFORMS="miyoomini my282 my355"
+PLATFORMS="miyoomini my355"
 GATEIMG="golang:1.25-bookworm"
 fail(){ echo "LAUNCHERS ABORT: $*" >&2; exit 1; }
 hash(){ sha256sum "$1" | cut -d" " -f1; }
@@ -67,7 +67,6 @@ hash(){ sha256sum "$1" | cut -d" " -f1; }
 img_for(){ # pinned image per platform — my355 MUST be the xcross (see TRAP above)
   case "$1" in
     miyoomini) echo miyoomini-toolchain;;
-    my282)     echo my282-toolchain;;
     my355)     echo my355-xcross;;
     *) fail "no pinned toolchain image for platform '$1'";;
   esac
@@ -116,12 +115,6 @@ build_plat(){ # <plat>
     miyoomini)
       docker run --rm -v "$WS":/root/workspace -w /root/workspace "$img" /bin/bash -lc \
         'cd miyoomini/libmsettings && make && cd /root/workspace/all/minui && make PLATFORM=miyoomini && cd /root/workspace/all/minarch && make PLATFORM=miyoomini' >&2 \
-        || fail "$p launcher build failed"
-      ;;
-    my282)
-      # buildroot env lives in /root/setup-env.sh; libmstick must exist before -lmstick links
-      docker run --rm -v "$WS":/root/workspace -w /root/workspace "$img" /bin/bash -lc \
-        'source /root/setup-env.sh && cd my282/libmsettings && make && cd /root/workspace/my282/libmstick && make && cd /root/workspace/all/minui && make PLATFORM=my282 && cd /root/workspace/all/minarch && make PLATFORM=my282' >&2 \
         || fail "$p launcher build failed"
       ;;
     my355)
