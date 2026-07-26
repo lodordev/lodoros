@@ -1,6 +1,6 @@
 #!/bin/sh
 # Phase 3 off-hardware test: manifest -> --fetch-update -> staged tree -> boot applier,
-# against a fake LodorOS card. Run on Panther (needs the built amd64 engine at $ENG).
+# against a fake LodorOS card. Run on the build host (needs the built amd64 engine at $ENG).
 # Covers the lodor#46 resume contract (partial sidecar + identity + Range) and the
 # lodor#47 rollback/revert contract (pre-apply mirror, bounded set, boot-time revert).
 set -eu

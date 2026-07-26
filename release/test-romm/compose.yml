@@ -3,8 +3,8 @@
 # No metadata-provider keys on purpose: scan populates from filesystem only, zero egress.
 #
 # BIND ADDRESS: loopback by default. ROMM_TEST_BIND is set by up.sh — plain
-# `docker compose up` keeps 127.0.0.1. LAN mode (192.168.50.120) exists SOLELY for
-# the Crookshanks AVD e2e leg (integrations/android/test/avd-e2e.sh); see up.sh header.
+# `docker compose up` keeps 127.0.0.1. LAN mode (a host LAN IP you supply) exists SOLELY for
+# the macOS AVD e2e leg (integrations/android/test/avd-e2e.sh); see up.sh header.
 services:
   test-romm:
     image: rommapp/romm:5.0.0

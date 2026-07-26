@@ -17,7 +17,7 @@
 #   continuation must match the fresh-boot trajectory by the same verdict rules.
 #
 # Verdicts are FACTS about the exact binaries run; every core version (retro_get_system_info),
-# sha256 and provenance is recorded in the matrix. Cores/roms default to the canonical panther
+# sha256 and provenance is recorded in the matrix. Cores/roms default to the canonical build-host
 # locations (shipped card tree, mgba cert bins, RomM library, libretro buildbot for the two
 # CFW-provided arm64 cores) — all overridable via XARCH_* env.
 #

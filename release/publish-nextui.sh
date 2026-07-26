@@ -16,7 +16,7 @@
 #
 # Usage:
 #   publish-nextui.sh stage                     assemble + gate + build Lodor.pak.zip (no side effects
-#                                               outside release/out/). Needs docker (Panther).
+#                                               outside release/out/). Needs docker.
 #   NOTES="what changed" publish-nextui.sh publish
 #                                               sync pak source -> the lodor-nextui clone, tag,
 #                                               create the GitHub release, upload + verify assets,

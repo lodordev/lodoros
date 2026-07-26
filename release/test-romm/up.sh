@@ -9,12 +9,12 @@
 #
 # LAN MODE (opt-in, NEVER the default):
 #   ROMM_TEST_LAN=1 sh release/test-romm/up.sh
-# publishes on 192.168.50.120:8998 (Panther's LAN IP) INSTEAD of loopback. It exists
-# SOLELY for the Crookshanks AVD e2e leg (integrations/android/test/avd-e2e.sh), whose
+# publishes on <your-lan-ip>:8998 INSTEAD of loopback. It exists
+# SOLELY for the macOS AVD e2e leg (integrations/android/test/avd-e2e.sh), whose
 # emulator must reach this instance across the LAN. Tear down after the run — either
 # down.sh, or re-run up.sh without ROMM_TEST_LAN to snap the bind back to loopback
 # (the port change alone recreates the container; volumes/state survive).
-# Override the LAN IP with ROMM_TEST_LAN_IP if Panther ever moves off .120.
+# Set the LAN IP with ROMM_TEST_LAN_IP; LAN mode refuses to start without it.
 #
 # HOW SCANNING WORKS HERE (RomM 5.0.0, learned the hard way 2026-07-22):
 #  - `scan_library` is manual_run:false — the REST task API refuses it; real scans are
@@ -31,11 +31,14 @@ ADMIN_USER=testadmin
 ADMIN_PASS=testadmin-pw
 
 # Bind selection: loopback default; LAN only when explicitly asked for (AVD e2e leg).
-LAN_IP=${ROMM_TEST_LAN_IP:-192.168.50.120}
+LAN_IP=${ROMM_TEST_LAN_IP:-}
 if [ "${ROMM_TEST_LAN:-0}" = "1" ]; then
+  # LAN mode has no default IP on purpose: the previous default hard-coded one host's
+  # address. Callers must name the address they want to publish on.
+  [ -n "$LAN_IP" ] || { echo "FATAL: ROMM_TEST_LAN=1 needs ROMM_TEST_LAN_IP=<this host's LAN IP>" >&2; exit 2; }
   export ROMM_TEST_BIND="$LAN_IP"
   BASE="http://$LAN_IP:8998"
-  echo ">> LAN MODE: binding $LAN_IP:8998 (Crookshanks AVD e2e only — tear down after)"
+  echo ">> LAN MODE: binding $LAN_IP:8998 (macOS AVD e2e only — tear down after)"
 else
   export ROMM_TEST_BIND=127.0.0.1
   BASE=http://127.0.0.1:8998

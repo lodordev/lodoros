@@ -27,7 +27,7 @@ the manifest's origin. Defense in depth.
 - **Private key** (signs the manifest): PEM PKCS8 ed25519 at
   `/mnt/user/appdata/lodor/update-signing-ed25519.key` on the release host
   (mode 600), **out of the repo** exactly like the Android keystore, **backed up
-  to titan**. The pipeline signer reads it *by path* at sign time; it is never
+  to a separate offline host**. The pipeline signer reads it *by path* at sign time; it is never
   copied into the repo, printed, or committed. `LODOR_UPDATE_SIGNING_KEY`
   overrides the path.
 - **Trusted public key** (embedded in the engine, `engine/update/signing.go`):

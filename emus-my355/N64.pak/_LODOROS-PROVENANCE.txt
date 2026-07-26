@@ -4,7 +4,7 @@ WHAT GIT TRACKS: scripts + metadata only (same policy as emus-h700). The binary 
 under my355/ is injected at release assembly and is NOT in this repo:
   - mupen64plus (ui-console) + core + audio-sdl / input-sdl / rsp-hle plugins,
     GLideN64 + Rice video plugins, and the vendored .so closure
-    (built 2026-06-28 in panther:/mnt/cache/tmp/lodor-heavyemu-build — upstream
+    (built 2026-06-28 in a local heavy-emulator build tree — upstream
     mupen64plus/GLideN64 sources, GPLv2; SDL2 kmsdrm flavor for RK3566/Panfrost)
   - my355/evtest — evtest built from the MinUI my355 workspace (workspace/my355/other/
     evtest), used by m64-watch.sh for MENU long-press detection
@@ -26,5 +26,5 @@ firmware implements lid/sleep and the MENU contract:
     reopen = resume; lid closed 120s or MENU held 2s = clean SIGTERM so the wrapper's
     save-push trap fires. FIFO-based evtest reader; trap-safe cleanup (never leaves a
     dark screen, a frozen emulator, or an orphaned evtest).
-Off-device verification 2026-07-06: 15/15 in the simulated lid/input rig on Panther;
+Off-device verification 2026-07-06: 15/15 in the simulated lid/input rig on the build host;
 --set overrides proven applied by the real arm64 binary under qemu-aarch64.

@@ -228,7 +228,7 @@ $bios"
   if [ -f "$ROOT/.pii-terms.conf" ]; then
     hostpat=$(sed -n 2p "$ROOT/.pii-terms.conf")
     [ -n "$hostpat" ] || fail "redistributable: $ROOT/.pii-terms.conf has no line-2 host pattern"
-    leak=$(grep -rliE "$hostpat" "$d" 2>/dev/null | grep -viE "example|template|schema" || true)
+    leak=$(grep -rliE --exclude-dir=.git "$hostpat" "$d" 2>/dev/null | grep -viE "example|template|schema" || true)
     [ -z "$leak" ] || bad="$bad
 PRIVATE hostname/tailnet leak:
 $leak"
@@ -275,7 +275,7 @@ cmd_agent_pii(){
   fi
   pat=$(head -n1 "$ROOT/.pii-terms.conf")
   [ -n "$pat" ] || fail "agent-pii: $ROOT/.pii-terms.conf is empty"
-  hits=$(grep -rlwiIE "$pat" "$d" 2>/dev/null || true)
+  hits=$(grep -rlwiIE --exclude-dir=.git "$pat" "$d" 2>/dev/null || true)
   if [ -n "$hits" ]; then echo "$hits"; fail "agent-pii: internal/personal name in shipped text under $d (files above)"; fi
   names=$(find "$d" | grep -wiE "$pat" || true)
   if [ -n "$names" ]; then echo "$names"; fail "agent-pii: internal/personal name in a shipped path name under $d"; fi
@@ -305,6 +305,11 @@ cmd_store_version(){
 # [channel] scopes the tag-pin assertion to the ONE channel this run publishes. Every channel
 # still gets the shape checks; only the published channel must point at <tag>. Omit it to keep
 # the historical every-channel behaviour.
+# NOTE (2026-07-26): every scan below skips .git. These gates describe a SHIPPED tree, and
+# .git is never shipped — publish paths stage a work tree and `git add -A` from it. Scanning it
+# produced pure false positives that masked real ones: a clone's .git/config carries the token
+# used to fetch it, and .git/logs carries the LOCAL git identity (e.g. root@<hostname>), so every
+# repo looked like it leaked. What ships is what gets gated.
 cmd_update_manifest(){
   mf=${1:?usage: gate.sh update-manifest <versions.json> [tag] [channel]}
   tag=${2:-}
@@ -381,7 +386,7 @@ cmd_secrets() {
   hits=""
   scan() { # scan <label> <grep-flags> <ERE>
     _lbl=$1; _fl=$2; _re=$3
-    _h=$(grep -rlI $_fl -E "$_re" "$d" 2>/dev/null || true)
+    _h=$(grep -rlI $_fl --exclude-dir=.git -E "$_re" "$d" 2>/dev/null || true)
     [ -z "$_h" ] || hits="$hits
 [$_lbl]
 $_h"
@@ -406,7 +411,7 @@ $_h"
   #   token= hJ3kQ9pasteXw82LmZq4v"            -> FLAGGED (contains 'paste'; entropy dominates)
   #   token= paste-your-token-here"            -> excluded (placeholder-dominant)
   #   token= <YOUR_TOKEN_GOES_HERE>"           -> excluded (whole-value angle placeholder)
-  _tokfiles=$(grep -rlIE '"token"[[:space:]]*:[[:space:]]*"[^"]{16,}"' "$d" 2>/dev/null || true)
+  _tokfiles=$(grep -rlIE --exclude-dir=.git '"token"[[:space:]]*:[[:space:]]*"[^"]{16,}"' "$d" 2>/dev/null || true)
   for _f in $_tokfiles; do
     _leak=0
     _vals=$(grep -ohIE '"token"[[:space:]]*:[[:space:]]*"[^"]{16,}"' "$_f" 2>/dev/null \
