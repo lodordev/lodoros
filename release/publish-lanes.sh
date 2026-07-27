@@ -45,7 +45,7 @@ gate_tree(){ sh "$ROOT/release/gate.sh" secrets "$1" && sh "$ROOT/release/gate.s
 commit_push(){ # <repo> <msg>
   cd "$WORK/$1"; git add -A
   if git diff --cached --quiet; then echo "  $1: source already current"
-  else git -c user.name=lodordev -c user.email=dev@lodor.local commit -q -m "$2"; fi
+  else git -c user.name=lodordev -c user.email=dev@lodor.dev commit -q -m "$2"; fi
   git -c credential.helper="$HELPER" push -q origin main
   echo "  $1 -> $(git rev-parse --short HEAD)"
 }
@@ -209,7 +209,7 @@ block = f"""{b}
 open(p, "w").write(s[:i] + block + s[j:])
 PY
 git add RELEASES.md
-git diff --cached --quiet || git -c user.name=lodordev -c user.email=dev@lodor.local commit -q -m "releases: $VERSION across all front-ends"
+git diff --cached --quiet || git -c user.name=lodordev -c user.email=dev@lodor.dev commit -q -m "releases: $VERSION across all front-ends"
 git -c credential.helper="$HELPER" push -q origin main
 
 echo "== 4/4 repo-parity gate =="

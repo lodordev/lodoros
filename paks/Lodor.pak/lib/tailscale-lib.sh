@@ -45,6 +45,12 @@ TS_SOCK="${TS_SOCK:-/tmp/lodor-tailscaled.sock}"  # tmpfs: FAT32 cannot bind a u
 # Cold-start socket budget (2026-07-02 field boot, NextUI lib lineage): 5s was NOT enough for a
 # cold start — the old code then KILLED the still-starting daemon and every retry repeated the
 # kill ("tailscaled socket never appeared" x4, daemon never got to speak). 30s default.
+# TS_GOMAXPROCS: tailscaled ran pinned to ONE core (GOMAXPROCS=1) to stay out of the
+# game's way. During a download-on-launch no game is running yet, and userspace WireGuard
+# is CPU-bound crypto, so the pin only costs headroom there. Default 2 on these quad-core
+# SoCs; override per-device without a rebuild. GOGC/GOMEMLIMIT are the OOM guards on a
+# 256 MB box and are deliberately unchanged.
+TS_GOMAXPROCS="${TS_GOMAXPROCS:-2}"
 TS_SOCK_WAIT_SECS="${TS_SOCK_WAIT_SECS:-30}"
 TS_SOCKS5_ADDR="${TS_SOCKS5_ADDR:-localhost:1055}"      # MUST match hosts[].socks5_proxy in config.json
 TS_MEMLIMIT="${TS_MEMLIMIT:-256MiB}"
@@ -100,7 +106,7 @@ _ts_running_pid() {
 # a dying daemon's own words are captured), recording TS_DAEMON_PID. ONE spawn site, shared
 # by tailscale_up and tailscale_up_interactive.
 _ts_spawn_daemon() {
-	$TS_BG env GOGC=10 GOMAXPROCS=1 GOMEMLIMIT="$TS_MEMLIMIT" "$TS_BIN_DIR/tailscaled" \
+	$TS_BG env GOGC=10 GOMAXPROCS="$TS_GOMAXPROCS" GOMEMLIMIT="$TS_MEMLIMIT" "$TS_BIN_DIR/tailscaled" \
 		--tun=userspace-networking \
 		--socks5-server="$TS_SOCKS5_ADDR" \
 		--statedir="$TS_STATEDIR" \
@@ -206,7 +212,7 @@ tailscale_up() {
 	if [ -n "$_tsrp" ]; then
 		ts_log "tailscaled already running (pid $_tsrp) but its socket is not answering yet — waiting on it instead of spawning a duplicate"
 	else
-		ts_log "starting userspace tailscaled (GOGC=10 GOMAXPROCS=1 GOMEMLIMIT=$TS_MEMLIMIT socks5=$TS_SOCKS5_ADDR)"
+		ts_log "starting userspace tailscaled (GOGC=10 GOMAXPROCS=$TS_GOMAXPROCS GOMEMLIMIT=$TS_MEMLIMIT socks5=$TS_SOCKS5_ADDR)"
 		_ts_spawn_daemon
 		_tsrp="$TS_DAEMON_PID"
 	fi

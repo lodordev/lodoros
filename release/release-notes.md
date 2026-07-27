@@ -1,6 +1,6 @@
-# LodorOS 1.0.0-alpha1
+# LodorOS 1.0.0-alpha2
 
-**First public alpha for 1.0** (engine + LodorOS fork share this stamp). Early, on purpose: expect rough edges and report them. Launch card everywhere, mGBA fleet-wide, honest updates for retired lanes.
+**Second 1.0 alpha** (engine + LodorOS fork share this stamp). Early, on purpose: expect rough edges and report them. This one is about the launch experience: a slow download now shows live progress instead of a frozen screen, and records what it did so a slow one can be explained. Launch card everywhere, mGBA fleet-wide, honest updates for retired lanes.
 
 ## What changed
 - **Launch card on the Miyoo Mini Flip (SSD202D).** The interactive launch card now renders *and
